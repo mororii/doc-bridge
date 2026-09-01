@@ -1,0 +1,137 @@
+name: Build Offline Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Verify clean tracked release source
+        shell: pwsh
+        run: |
+          git diff --check
+          if ($LASTEXITCODE -ne 0) {
+            throw 'git diff --check failed.'
+          }
+          $dirty = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0) {
+            throw 'git status failed.'
+          }
+          if ($dirty.Count -gt 0) {
+            $dirty | ForEach-Object { Write-Error $_ }
+            throw 'Release source is not a clean tracked worktree.'
+          }
+
+      - name: Parse all tracked PowerShell sources
+        shell: pwsh
+        run: |
+          $failures = [System.Collections.Generic.List[string]]::new()
+          $files = @(git ls-files -- '*.ps1' '*.psm1' '*.psd1')
+          if ($LASTEXITCODE -ne 0 -or $files.Count -eq 0) {
+            throw 'No tracked PowerShell sources were found.'
+          }
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path -LiteralPath $file).Path,
+              [ref]$tokens,
+              [ref]$errors)
+            foreach ($error in @($errors)) {
+              [void]$failures.Add("${file}:$($error.Extent.StartLineNumber): $($error.Message)")
+            }
+          }
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Error $_ }
+            throw "PowerShell parser found $($failures.Count) error(s)."
+          }
+          Write-Host "Parsed $($files.Count) tracked PowerShell files."
+
+      - name: Validate beginner guide
+        shell: pwsh
+        run: python tools/validate-guide.py
+
+      - name: Reject credentials and local personal data
+        shell: pwsh
+        run: python tools/validate-public-source.py
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore and build with warnings as errors
+        shell: pwsh
+        run: |
+          dotnet restore DocBridge.sln
+          dotnet build DocBridge.sln --configuration Release --no-restore --nologo -warnaserror
+
+      - name: Resolve and verify package version
+        id: version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content .codex-plugin/plugin.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          $base = ([string]$manifest.version).Split('+')[0]
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$base") {
+            throw "Tag $env:GITHUB_REF_NAME does not match plugin version v$base"
+          }
+          "base=$base" >> $env:GITHUB_OUTPUT
+          "zip=releases/DocBridge-$base-win-x64.zip" >> $env:GITHUB_OUTPUT
+          "sha=releases/DocBridge-$base-win-x64.zip.sha256" >> $env:GITHUB_OUTPUT
+
+      - name: Build and verify offline package
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/package-release.ps1 -KeepExpanded
+
+      - name: Verify exact package manifest coverage
+        shell: pwsh
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass
+          -File releases/DocBridge-${{ steps.version.outputs.base }}-win-x64/support/Test-PackageIntegrity.ps1
+          -PackageRoot releases/DocBridge-${{ steps.version.outputs.base }}-win-x64
+
+      - name: Run isolated installer lifecycle gate
+        shell: pwsh
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass
+          -File tools/test-installer.ps1
+          -PackageRoot releases/DocBridge-${{ steps.version.outputs.base }}-win-x64
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: DocBridge-${{ steps.version.outputs.base }}-win-x64
+          path: |
+            ${{ steps.version.outputs.zip }}
+            ${{ steps.version.outputs.sha }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish tagged GitHub release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIP_PATH: ${{ steps.version.outputs.zip }}
+          SHA_PATH: ${{ steps.version.outputs.sha }}
+          BASE_VERSION: ${{ steps.version.outputs.base }}
+        run: |
+          gh release view $env:GITHUB_REF_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME $env:ZIP_PATH $env:SHA_PATH --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME $env:ZIP_PATH $env:SHA_PATH `
+              --verify-tag --generate-notes --title "DocBridge $env:BASE_VERSION"
+          }

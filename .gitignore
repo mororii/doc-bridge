@@ -1,0 +1,38 @@
+# Build outputs
+**/bin/
+**/obj/
+dist/
+releases/
+TestResults/
+coverage/
+*.trx
+
+# Local test and research artifacts
+artifacts/
+output/
+reports/
+research/
+tmp/
+.tmp/
+
+# IDE and OS files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+
+# Local logs, backups, and generated diagnostics
+*.log
+*.tmp
+*.bak
+doctor-report.json
+installation.json
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+*.secrets.json

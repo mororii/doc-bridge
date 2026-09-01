@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "operation-result.schema.json",
+  "title": "OperationResult",
+  "description": "*_apply_ops 응답",
+  "type": "object",
+  "required": ["ok", "dryRun"],
+  "properties": {
+    "ok": { "type": "boolean" },
+    "dryRun": { "type": "boolean" },
+    "snapshotId": { "type": ["string", "null"] },
+    "confirmToken": { "type": ["string", "null"] },
+    "expiresInSec": { "type": "integer", "minimum": 0 },
+    "requiresHighRiskApproval": { "type": "boolean", "default": false },
+    "affected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "ref"],
+        "properties": {
+          "type": { "type": "string" },
+          "ref": { "type": "string" }
+        },
+        "additionalProperties": true
+      },
+      "default": []
+    },
+    "diff": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "ref": { "type": "string" },
+          "before": {},
+          "after": {}
+        },
+        "additionalProperties": true
+      },
+      "default": []
+    },
+    "diffTruncated": { "type": "boolean", "default": false },
+    "elapsedMs": { "type": "integer", "minimum": 0 },
+    "operationResults": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "op", "ok", "elapsedMs"],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "op": { "type": "string" },
+          "ok": { "type": "boolean" },
+          "elapsedMs": { "type": "integer", "minimum": 0 },
+          "error": { "type": ["string", "null"] }
+        },
+        "additionalProperties": true
+      },
+      "default": []
+    },
+    "rollback": {
+      "type": "object",
+      "properties": {
+        "attempted": { "type": "boolean" },
+        "verified": { "type": "boolean" },
+        "elapsedMs": { "type": "integer", "minimum": 0 },
+        "result": { "type": "object" },
+        "error": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "readback": {
+      "type": ["object", "null"],
+      "description": "적용 후 readback 검증 결과",
+      "properties": {
+        "verified": { "type": "boolean" },
+        "checked": { "type": "integer" },
+        "mismatches": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": true
+    },
+    "interaction": {
+      "type": ["object", "null"],
+      "description": "비활성 창 작업 중 전경 유지, 사용자 입력 충돌, 원래 문서/화면 상태 복원 결과",
+      "properties": {
+        "policy": { "type": "string" },
+        "foregroundPreserved": { "type": "boolean" },
+        "foregroundRestoreAttempted": { "type": "boolean" },
+        "foregroundRestored": { "type": ["boolean", "null"] },
+        "targetWasForegroundAtStart": { "type": "boolean" },
+        "userActivityDetected": { "type": "boolean" },
+        "interrupted": { "type": "boolean" },
+        "internalDocumentSwitched": { "type": "boolean" },
+        "originalStateRestored": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "warnings": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "errors": { "type": "array", "items": { "type": "string" }, "default": [] }
+  },
+  "additionalProperties": true
+}

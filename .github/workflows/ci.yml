@@ -1,0 +1,71 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore DocBridge.sln
+
+      - name: Build
+        run: dotnet build DocBridge.sln --configuration Release --no-restore --nologo
+
+      - name: Verify version consistency
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/Test-DocBridgeVersion.ps1
+
+      - name: Run unit and MCP tests
+        shell: pwsh
+        run: |
+          Remove-Item Env:DOCBRIDGE_E2E -ErrorAction SilentlyContinue
+          dotnet test DocBridge.sln --configuration Release --no-build --nologo --verbosity minimal --filter "FullyQualifiedName!~E2ETests&Category!=E2E" --logger "trx;LogFileName=docbridge-tests.trx"
+
+      - name: Upload test results on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: '**/TestResults/*.trx'
+          if-no-files-found: ignore
+          retention-days: 7
+
+  source-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Reject generated or local-only content
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden='^(dist|releases|artifacts|output|reports|research|tmp|\.tmp)/'
+          if git ls-files | grep -E "$forbidden"; then
+            echo 'Generated, research, or local-only content is tracked.' >&2
+            exit 1
+          fi
+
+      - name: Reject absolute local home-directory paths
+        run: python tools/validate-public-source.py

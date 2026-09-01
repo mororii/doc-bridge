@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>DocBridge.Core</RootNamespace>
+    <AssemblyName>DocBridge.Core</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 정책/스키마 기본본을 어셈블리에 포함 (파일이 없을 때 fallback) -->
+    <EmbeddedResource Include="..\..\ops\policies\default.policy.json" LogicalName="DocBridge.ops.policies.default.policy.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DocBridge.Core.Tests" />
+  </ItemGroup>
+
+</Project>

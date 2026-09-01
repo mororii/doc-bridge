@@ -1,0 +1,64 @@
+name: Real Windows App E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# This workflow intentionally requires a dedicated interactive Windows runner with
+# Excel, Hancom HWP and AutoCAD installed.  It must never run on a user's workstation.
+concurrency:
+  group: docbridge-real-app-e2e
+  cancel-in-progress: false
+
+jobs:
+  excel-hwp-cad:
+    runs-on: [self-hosted, Windows, X64, docbridge-e2e]
+    timeout-minutes: 60
+    env:
+      DOCBRIDGE_E2E: '1'
+      DOCBRIDGE_HWP_TABLE_COUNT_E2E: '1'
+      DOCBRIDGE_HWP_UNICODE_E2E: '1'
+      DOCBRIDGE_HWP_TABLE_PICTURE_E2E: '1'
+      DOCBRIDGE_HWP_SEQUENTIAL_PREVIEW_E2E: '1'
+      DOCBRIDGE_HWP_ISSUE1_E2E: '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore and build
+        shell: pwsh
+        run: |
+          dotnet restore DocBridge.sln
+          dotnet build DocBridge.sln --configuration Release --no-restore --nologo
+
+      - name: Verify installed applications
+        shell: pwsh
+        run: |
+          $required = @('Excel.Application', 'HWPFrame.HwpObject', 'AutoCAD.Application')
+          foreach ($progId in $required) {
+            if ($null -eq [Type]::GetTypeFromProgID($progId)) {
+              throw "Required COM application is not installed: $progId"
+            }
+          }
+
+      - name: Run real COM E2E tests
+        shell: pwsh
+        run: |
+          dotnet test tests/DocBridge.Core.Tests/DocBridge.Core.Tests.csproj --configuration Release --no-build --nologo --verbosity normal --filter "FullyQualifiedName~E2ETests|Category=E2E" --logger "trx;LogFileName=real-app-e2e.trx"
+
+      - name: Upload E2E results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-app-e2e-results
+          path: '**/TestResults/*.trx'
+          if-no-files-found: error
+          retention-days: 14

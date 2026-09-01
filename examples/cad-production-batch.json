@@ -1,0 +1,25 @@
+{
+  "ops": [
+    {
+      "op": "draw_entities",
+      "entities": [
+        { "type": "line", "start": [0, 0], "end": [100, 0], "layer": "PLAN", "color": { "aci": 3 } },
+        { "type": "arc", "center": [50, 25], "radius": 20, "startAngleDeg": 0, "endAngleDeg": 180, "layer": "PLAN" },
+        { "type": "mtext", "point": [0, 50], "width": 100, "height": 3.5, "text": "DocBridge ActiveX 제작 예제" },
+        { "type": "dim_aligned", "start": [0, 0], "end": [100, 0], "textPoint": [50, -10] }
+      ]
+    },
+    { "op": "configure_layout", "name": "DOCBRIDGE-A3", "create": true, "configName": "DWG To PDF.pc3" },
+    {
+      "op": "create_viewport",
+      "layout": "DOCBRIDGE-A3",
+      "center": [210, 148.5],
+      "width": 380,
+      "height": 250,
+      "viewCenter": [50, 25],
+      "viewHeight": 80,
+      "displayLocked": true
+    }
+  ],
+  "dryRun": true
+}

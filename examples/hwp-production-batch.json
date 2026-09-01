@@ -1,0 +1,51 @@
+{
+  "ops": [
+    {
+      "op": "set_page_setup",
+      "applyTo": "document",
+      "page": {
+        "widthMm": 210,
+        "heightMm": 297,
+        "orientation": "portrait",
+        "leftMarginMm": 20,
+        "rightMarginMm": 20,
+        "topMarginMm": 15,
+        "bottomMarginMm": 15
+      }
+    },
+    {
+      "op": "set_paragraph_style_basic",
+      "target": { "text": "공사 일일계획서" },
+      "style": {
+        "fontName": "맑은 고딕",
+        "fontSize": 18,
+        "bold": true,
+        "textColor": "#1F4E78",
+        "align": "center"
+      }
+    },
+    {
+      "op": "set_paragraph_format",
+      "target": { "scope": "document" },
+      "style": {
+        "lineSpacingPercent": 160,
+        "spaceAfterPt": 4,
+        "widowOrphan": true
+      }
+    },
+    {
+      "op": "table_cell_set_text",
+      "tableIndex": 0,
+      "row": 1,
+      "col": 2,
+      "text": "완료"
+    },
+    {
+      "op": "insert_page_number",
+      "position": "bottom-center",
+      "format": "arabic",
+      "startNumber": 1
+    }
+  ],
+  "dryRun": true
+}

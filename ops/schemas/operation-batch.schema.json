@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "operation-batch.schema.json",
+  "title": "OperationBatch",
+  "description": "*_apply_ops 입력. 모든 쓰기는 dryRun=true가 기본이며, 실제 적용은 confirmToken이 필요하다.",
+  "type": "object",
+  "required": ["ops", "dryRun"],
+  "properties": {
+    "ops": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["op"],
+        "properties": {
+          "op": { "type": "string", "minLength": 1 },
+          "target": { "type": "object" },
+          "options": { "type": "object" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "dryRun": { "type": "boolean", "default": true },
+    "confirmToken": { "type": ["string", "null"] },
+    "highRiskConfirm": {
+      "type": "boolean",
+      "default": false,
+      "description": "배치에 고위험 op가 포함된 경우 최종 적용 시 명시적으로 true여야 한다"
+    }
+  },
+  "additionalProperties": false
+}

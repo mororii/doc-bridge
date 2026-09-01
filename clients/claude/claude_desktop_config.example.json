@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "doc-bridge": {
+      "command": "C:\\Path\\To\\DocBridge\\codex-marketplace\\plugins\\doc-bridge\\dist\\doc-bridge-mcp.exe",
+      "args": ["--stdio"]
+    }
+  }
+}

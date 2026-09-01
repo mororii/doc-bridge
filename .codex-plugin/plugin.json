@@ -1,0 +1,44 @@
+{
+  "name": "doc-bridge",
+  "version": "0.4.18+codex.20260901042242",
+  "description": "Control local Microsoft Excel, Hancom HWP, and AutoCAD through a safety-gated MCP server.",
+  "author": {
+    "name": "DocBridge Local"
+  },
+  "keywords": [
+    "excel",
+    "hwp",
+    "autocad",
+    "mcp",
+    "windows-automation"
+  ],
+  "skills": "./skills/",
+  "mcpServers": {
+    "doc-bridge": {
+      "command": "./dist/doc-bridge-mcp.exe",
+      "args": [
+        "--stdio"
+      ],
+      "cwd": "."
+    }
+  },
+  "interface": {
+    "displayName": "DocBridge",
+    "shortDescription": "Excel\u00b7\ud55c\uae00\u00b7AutoCAD \ub85c\uceec \ubb38\uc11c \uc790\ub3d9\ud654",
+    "longDescription": "Connects directly to open Excel, Hancom HWP, and AutoCAD windows, with file-based fallback. Every edit uses dry-run, full snapshot, confirmation token, and readback verification.",
+    "developerName": "DocBridge Local",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Local App Control"
+    ],
+    "defaultPrompt": [
+      "\ud604\uc7ac \uc5f4\ub9b0 Excel \ubb38\uc11c\uc640 \uc120\ud0dd \ubc94\uc704\ub97c \uc694\uc57d\ud574 \uc918.",
+      "\uc0c8 \ud55c\uae00 \ubb38\uc11c\ub97c \ub9cc\ub4e4\uae30 \uc804\uc5d0 \uc81c\uc791 \uacbd\ub85c\ub97c \ud3c9\uac00\ud558\uace0 \uac80\uc99d\ub41c \ubc29\uc2dd\uc73c\ub85c \uc791\uc131\ud574 \uc918.",
+      "\uc774 \ud55c\uae00 \ubb38\uc11c\uc758 \ub0b4\uc6a9\uc744 \uc77d\uace0 \uc218\uc815\uc548\uc744 \uba3c\uc800 \ubcf4\uc5ec \uc918.",
+      "\ud604\uc7ac AutoCAD \ub3c4\uba74\uc758 \ub808\uc774\uc5b4\uc640 \uc5d4\ud2f0\ud2f0\ub97c \uc810\uac80\ud574 \uc918."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

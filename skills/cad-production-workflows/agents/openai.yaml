@@ -1,0 +1,4 @@
+interface:
+  display_name: "AutoCAD 실무 제작"
+  short_description: "직접 ActiveX 도형·수정·도곽·배치·출력"
+  default_prompt: "열린 AutoCAD 도면과 대상 영역을 먼저 분석하고, 화면 조작이나 LISP 없이 DocBridge 직접 ActiveX 작업으로 작성·검증해 줘."

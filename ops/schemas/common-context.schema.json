@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "common-context.schema.json",
+  "title": "CommonContext",
+  "description": "*_get_active_context / read tool 응답의 공통 envelope",
+  "type": "object",
+  "required": ["ok", "app"],
+  "properties": {
+    "ok": { "type": "boolean" },
+    "app": { "type": "string", "enum": ["excel", "hwp", "cad", "fake"] },
+    "documentRef": {
+      "type": ["string", "null"],
+      "description": "열린 문서의 경로 또는 식별자. 문서 없으면 null"
+    },
+    "summary": {
+      "type": "object",
+      "description": "앱별 요약(시트 목록, 문단 수, 레이어 목록 등)"
+    },
+    "selection": {
+      "type": ["object", "null"],
+      "description": "현재 선택 영역 정보(주소/텍스트/객체 요약)"
+    },
+    "warnings": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "errors": { "type": "array", "items": { "type": "string" }, "default": [] }
+  },
+  "additionalProperties": true
+}

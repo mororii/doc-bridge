@@ -1,0 +1,50 @@
+---
+description: Safely edit Excel, HWP/HWPX, and AutoCAD documents through the DocBridge MCP approval workflow
+globs:
+alwaysApply: true
+---
+
+# DocBridge safe automation
+
+- Use only the `doc-bridge` MCP tools for Excel, HWP/HWPX, and AutoCAD automation. Do not replace them with GUI clicking, PowerShell/Python COM, VBA, AutoLISP, LSP, or generated fallback scripts.
+- If DocBridge tools are unavailable, stop before changing documents and ask the user to run `2-TEST.cmd`. Do not modify project files to simulate the missing tools.
+- Start with `core_ping` and `core_get_status`, then read the exact target document before proposing a write.
+- Never let two AI clients or the user and an AI edit the same Excel workbook, HWP document, or DWG at the same time.
+
+## Excel connection preflight
+
+- Read `core_get_status.apps.excel.connected` and `core_get_status.apps.excel.document` before calling `excel_get_active_context`. Call it once only when `connected` is `true` and `document` is non-empty.
+- If Excel is disconnected or `document` is empty, do not call `excel_get_active_context` as a probe and do not retry it in a loop. Retry only after a real state change and a fresh status response, such as the user opening a workbook.
+- `allowOpenFile` defaults to `false`. Set `allowOpenFile:true` with an absolute workbook path only when the user explicitly asks to read that closed file. Never use it for writes, infer it from a generic Excel request, or invent a path. If a write requires the workbook to be open, report that requirement instead of launching an empty Excel window.
+- If a DocBridge Excel call fails or reports a limitation, preserve and report the original DocBridge error, then stop. Never bypass it with `openpyxl`, `pywin32` or `DispatchEx("Excel.Application")`, PowerShell Excel COM, `Start-Process`, shell/UI automation, or repeated on-disk workbook overwrite. Resume only after a real state change or the user explicitly selects a supported DocBridge route.
+- After a path-only workflow, or when status detail is `DocBridge가 생성한 인스턴스`, verify that there are no unsaved changes and call `excel_disconnect`. Never quit a user-owned Excel instance; disconnect only releases DocBridge's reference to it.
+
+## Mandatory write sequence
+
+1. Read the exact target and capture its `documentRef` or equivalent identity.
+2. Call the relevant `*_apply_ops` with `dryRun=true`.
+3. Show the diff, affected range/object count, snapshot information, and `confirmToken` to the user. Wait for explicit approval.
+4. Apply with `dryRun=false`, the unmodified `ops`, and the token from that dry-run.
+5. Read the changed cells, text/table structure, or CAD entities back and verify the result. Do not claim completion from a successful tool call alone.
+
+Never invent a token. A token is one-use, expires after five minutes, and is bound to the exact app, target, and ops. If the ops or target change, the token expires, or the document fingerprint changes, read again and create a new dry-run.
+
+## App-specific targeting
+
+- Excel writes must specify `target.sheet` or a quoted sheet-qualified range such as `'내역서'!B2`. Never infer the active sheet for a write. If both forms are present, they must name the same sheet. Before and after merge or visibility edits, call `excel_read_range` with `includeLayout=true` and inspect `mergedAreas`, row/column hidden states, sheet visibility, and `coverage.complete`.
+- `merge_cells` and `unmerge_cells` must be the only op in their batch. Do not approve a merge when the dry-run reports content outside the upper-left cell, an overlapping merged area, or incomplete layout coverage.
+- Keep `set_rows_hidden`, `set_cols_hidden`, and `set_sheet_visibility` in a visibility-only batch. They may be combined with one another, but never with values, formulas, formatting, sheet copy, merge, or unmerge. Do not hide the active or last visible sheet, and do not request `veryHidden`.
+- HWP work starts with `hwp_get_active_context`. Select the requested item from `summary.openDocuments` and keep its `documentRef` or `instanceRef` through read, dry-run, apply, and readback. Do not mix `file` and `documentRef`, or multiple HWP documents, in one batch.
+- CAD work starts with `cad_get_active_context`. Preserve the drawing identity, layout, units, and coordinate basis. If `interaction.interrupted` or `userActivityDetected` is true, re-query the drawing and create a new dry-run for only the remaining work.
+
+## Large CAD drawings
+
+`cad_get_active_context` defaults to `detailLevel="basic"` and deliberately skips layer/entity traversal. Use its `nextActions` instead of concluding that content is missing. Request `detailLevel="summary"` only when a bounded layer/entity sample is genuinely needed, then use a targeted follow-up:
+
+- all layers: `cad_query_entities` with `scope="layers"`
+- multiple drawing frames: `scope="regions"` with explicit rectangles
+- one area: `scope="window"` with explicit minimum/maximum coordinates
+- pipe labels or route names: use a text filter and, when known, a layer filter
+- a known object family: use `entityType` and layer filters, then paginate if the response says more results remain
+
+Record the requested detail level, query scope, and returned/total counts. For a write, verify newly created entities by handle, type, layer, text, and bounding box rather than relying on context output.

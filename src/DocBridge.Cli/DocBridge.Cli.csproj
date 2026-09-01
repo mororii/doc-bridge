@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\DocBridge.Core\DocBridge.Core.csproj" />
+    <ProjectReference Include="..\DocBridge.Mcp\DocBridge.Mcp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\assets\hwp-security\FilePathCheckerModuleExample.dll"
+             Link="hwp-security\FilePathCheckerModuleExample.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>doc-bridge-cli</AssemblyName>
+    <RootNamespace>DocBridge.Cli</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

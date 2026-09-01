@@ -1,0 +1,4 @@
+interface:
+  display_name: "한글 실무 문서 제작"
+  short_description: "DOCX 우선 생성과 HWP 실무 서식 편집·렌더 검증"
+  default_prompt: "Use $hwp-production-workflows and call hwp_plan_creation before any new document. Follow the returned DOCX-first or native-HWP route, then verify structure and every rendered page."
