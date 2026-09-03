@@ -72,6 +72,69 @@ public class FakeFlowTests : IDisposable
     }
 
     [Fact]
+    public void Identical_dryrun_reuses_preview_and_snapshot_after_fingerprint_validation()
+    {
+        var adapter = Assert.IsType<DocBridge.Core.Adapters.FakeAdapter>(_host.Router.Get("fake"));
+        var first = _host.ApplyOps("fake", SetValuesBatch(dryRun: true));
+        var second = _host.ApplyOps("fake", SetValuesBatch(dryRun: true));
+
+        Assert.True(Json.GetBool(first, "ok"));
+        Assert.True(Json.GetBool(second, "ok"));
+        Assert.Equal(Json.GetString(first, "snapshotId"), Json.GetString(second, "snapshotId"));
+        Assert.NotEqual(Json.GetString(first, "confirmToken"), Json.GetString(second, "confirmToken"));
+        Assert.Equal(1, adapter.PreviewCallCount);
+        var timings = Json.GetObj(second, "timings")!;
+        Assert.True(Json.GetBool(timings, "previewCacheHit"));
+        Assert.True(Json.GetBool(timings, "previewReused"));
+        Assert.True(Json.GetBool(timings, "snapshotReused"));
+        Assert.Equal(0, Json.GetLong(timings, "previewMs"));
+        Assert.Equal(0, Json.GetLong(timings, "snapshotMs"));
+        Assert.Equal("fake-full-state", Json.GetString(timings, "dryRunFingerprintMethod"));
+
+        var snapshots = Json.GetArr(_host.CoreListSnapshots(new JsonObject { ["app"] = "fake" }), "snapshots")!;
+        Assert.Single(snapshots);
+    }
+
+    [Fact]
+    public void Changed_document_forces_new_dryrun_preview_and_snapshot()
+    {
+        var adapter = Assert.IsType<DocBridge.Core.Adapters.FakeAdapter>(_host.Router.Get("fake"));
+        var first = _host.ApplyOps("fake", SetValuesBatch(dryRun: true));
+        adapter.Sheets["Sheet1"]["B2"] = "external-change";
+
+        var second = _host.ApplyOps("fake", SetValuesBatch(dryRun: true));
+
+        Assert.True(Json.GetBool(second, "ok"));
+        Assert.NotEqual(Json.GetString(first, "snapshotId"), Json.GetString(second, "snapshotId"));
+        Assert.Equal(2, adapter.PreviewCallCount);
+        var timings = Json.GetObj(second, "timings")!;
+        Assert.False(Json.GetBool(timings, "previewCacheHit"));
+        Assert.False(Json.GetBool(timings, "snapshotReused"));
+        Assert.Contains("changed", Json.GetString(timings, "dryRunCacheMissReason"), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Validation_failure_returns_expected_schema_without_touching_adapter()
+    {
+        var result = _host.ApplyOps("hwp", Json.ParseObject("""
+        {
+          "ops": [
+            { "op": "insert_table", "rows": 2 },
+            { "op": "set_page_setup" }
+          ],
+          "dryRun": true
+        }
+        """));
+
+        Assert.False(Json.GetBool(result, "ok"));
+        Assert.Equal(2, Json.GetArr(result, "errors")!.Count);
+        var schemas = Json.GetArr(result, "expectedSchema")!;
+        Assert.Equal(2, schemas.Count);
+        Assert.Equal("insert_table", Json.GetString(schemas[0] as JsonObject, "op"));
+        Assert.Equal("set_page_setup", Json.GetString(schemas[1] as JsonObject, "op"));
+    }
+
+    [Fact]
     public void Apply_without_confirm_token_fails()
     {
         var result = _host.ApplyOps("fake", SetValuesBatch(dryRun: false, token: null));
@@ -152,6 +215,16 @@ public class FakeFlowTests : IDisposable
         var timings = Json.GetObj(dry, "timings")!;
         foreach (var key in new[] { "validationMs", "lockWaitMs", "statusMs", "previewMs", "snapshotMs", "tokenMs", "totalMs" })
             Assert.NotNull(Json.GetLong(timings, key));
+    }
+
+    [Fact]
+    public void Apply_request_reads_adapter_status_only_once()
+    {
+        var adapter = Assert.IsType<DocBridge.Core.Adapters.FakeAdapter>(_host.Router.Get("fake"));
+
+        _ = _host.ApplyOps("fake", SetValuesBatch(dryRun: true));
+
+        Assert.Equal(1, adapter.StatusCallCount);
     }
 
     [Fact]

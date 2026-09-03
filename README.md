@@ -1,4 +1,4 @@
-# DocBridge 0.4.18
+# DocBridge 0.4.19
 
 Windows의 Microsoft Excel, 한컴 한글(HWP/HWPX), AutoCAD를 Kimi·Claude·Codex·Cursor가 공통 MCP 도구로 읽고 수정하게 하는 로컬 브리지입니다.
 
@@ -13,7 +13,9 @@ read → dry-run(diff + snapshot + confirmToken) → 요청 범위 검증
 
 ## 현재 검증 상태
 
-2026-08-31, Windows 11 환경에서 다음을 통과했습니다.
+2026-09-03: Core 비-E2E 218개 + MCP 19개 통과. 별도 실AutoCAD 임시 도면에서 문자 이동·축척, 자동/명시적 화면 재생성, 레이어 상태·켜짐 변경을 검증했습니다. 기존 사용자 도면의 저장 상태와 객체 수는 보존했습니다. 자세한 내용은 [0.4.19 릴리즈 노트](docs/RELEASE-0.4.19.md)를 참고하세요.
+
+이전 버전의 검증 기록(2026-08-31 기준):
 
 - 오프라인 배포 게이트: 217/217(Core 비-E2E 198 + MCP 19), 0.4.15 실Excel RCW·복사·구조 복구 E2E 1/1, 0.4.17 비생성 조회·경로 탐색 실Excel E2E 1/1. 0.4.18 이슈 #1 실한글 E2E는 정상 시작 실행 1/1을 기록했으며, 이 PC의 신선한 인스턴스 반복 검사는 구버전 한글 2024(13.0.0.866) TourPopup 초기화 오류로 op 진입 전에 차단되어 권장 패치 13.0.0.3870 이상에서 재실행해야 합니다.
 - 기존 실제 프로그램 E2E: 37/37
@@ -39,6 +41,7 @@ read → dry-run(diff + snapshot + confirmToken) → 요청 범위 검증
 - 한글 통합 읽기: `hwp_read_text(scope="bundle")`로 본문·문단 지도·구조·필드·표를 한 COM 연결에서 선택적으로 함께 읽음
 - 한글 CLI 안정성: 건식 검증과 실제 적용이 서로 다른 프로세스여도 실행 중인 한글 창을 status 단계에서 다시 식별해 저장되지 않은 문서의 `untitled-*` 참조를 유지
 - CAD 컨텍스트 경량화: `cad_get_active_context` 기본 `detailLevel="basic"`은 레이어·엔티티 순회를 생략하고 `nextActions`를 반환합니다. 제한 표본은 `summary`, 전체·영역 조회는 `cad_query_entities`의 `layers`/`regions`/`window` scope로 분리합니다.
+- CAD 0.4.19: 편집 배치 후 변경 도면을 자동 재생성하고 `readback.displayRefresh`로 결과를 구분합니다. 화면만 갱신하는 `regen_document`도 dry-run/토큰 경로로 지원합니다. `scope:"layers"`는 `current/on/freeze/locked/modelVisible`을 구분하며, 조회 생략은 `layerSummaryStatus:"omitted"`, 조회 불가는 `null`로 명시합니다. 객체의 색상·표시·투명도는 `includeGeometry:true`로 읽습니다.
 - Excel 0.4.8: workbook/객체 스캔, 수식 오류 검사, Protected View·모달 상태 진단
 - MCP stdio와 Streamable HTTP 연결 검증
 - MCP 프로토콜 `2024-11-05`, `2025-03-26`, `2025-06-18` 협상

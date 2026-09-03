@@ -18,6 +18,17 @@ public sealed class ConfirmTokenService
     private readonly string _storePath;
     private readonly string _keyPath;
     private readonly int _ttlSeconds;
+    private static int _cryptoWarmed;
+
+    /// <summary>
+    /// 첫 사용자 요청에서 HMACSHA256 JIT 비용이 튀지 않도록 서버 기동 중 한 번 실행한다.
+    /// 실제 토큰 키나 저장소에는 접근하지 않는 순수 런타임 웜업이다.
+    /// </summary>
+    public static void WarmUpCrypto()
+    {
+        if (Interlocked.Exchange(ref _cryptoWarmed, 1) != 0) return;
+        _ = HMACSHA256.HashData(new byte[32], Array.Empty<byte>());
+    }
 
     public ConfirmTokenService(Models.DocBridgeOptions options, int ttlSeconds = 300)
     {

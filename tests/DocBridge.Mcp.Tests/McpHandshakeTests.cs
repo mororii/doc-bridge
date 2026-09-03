@@ -168,6 +168,20 @@ public class McpHandshakeTests : IDisposable
         Assert.NotNull(Json.GetObj(hwpItemProperties, "replace"));
         Assert.NotNull(Json.GetObj(hwpItemProperties, "scope"));
         Assert.NotNull(Json.GetObj(hwpItemProperties, "cells"));
+        Assert.NotNull(Json.GetObj(hwpItemProperties, "page"));
+        Assert.NotNull(Json.GetObj(hwpItemProperties, "applyTo"));
+        Assert.NotNull(Json.GetObj(hwpItemProperties, "type"));
+        Assert.NotNull(Json.GetObj(hwpItemProperties, "name"));
+        Assert.NotNull(Json.GetObj(hwpItemProperties, "kind"));
+        Assert.NotNull(Json.GetObj(hwpItemProperties, "output"));
+        Assert.NotNull(Json.GetObj(hwpItemProperties, "startRow"));
+        Assert.NotNull(Json.GetObj(hwpItemProperties, "endCol"));
+        Assert.NotNull(Json.GetObj(hwpItemProperties, "columnWidths"));
+        Assert.NotNull(Json.GetObj(hwpItemProperties, "mergeCells"));
+        Assert.Contains("[[\"A\",\"B\"]", Json.GetString(hwpRows, "description"));
+        var pageProperties = Json.GetObj(Json.GetObj(hwpItemProperties, "page"), "properties")!;
+        Assert.NotNull(Json.GetObj(pageProperties, "widthMm"));
+        Assert.NotNull(Json.GetObj(pageProperties, "orientation"));
         Assert.Contains("순차 시뮬레이션", hwpDescription);
 
         var hwpLaunchTool = tools.Select(t => t as JsonObject)

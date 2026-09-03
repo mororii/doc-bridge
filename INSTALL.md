@@ -16,7 +16,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\package-release.
 `tools\Clear-DocBridgeReleaseCache.ps1`을 먼저 미리보기로 실행한 뒤 `-Apply`로 정리할 수 있으며,
 ZIP과 SHA-256 파일은 이 정리 대상에 포함되지 않습니다.
 
-생성 결과는 `releases\DocBridge-0.4.18-win-x64.zip`입니다. ZIP에는 .NET 8 `win-x64` 런타임, 한글 COM 격리 worker, Codex 플러그인/로컬 marketplace, Claude/Kimi/Cursor MCP 설정 병합기, 한글 보안 모듈 등록기, 진단기와 제거기가 모두 들어갑니다.
+생성 결과는 `releases\DocBridge-0.4.19-win-x64.zip`입니다. ZIP에는 .NET 8 `win-x64` 런타임, 한글 COM 격리 worker, Codex 플러그인/로컬 marketplace, Claude/Kimi/Cursor MCP 설정 병합기, 한글 보안 모듈 등록기, 진단기와 제거기가 모두 들어갑니다.
 
 새 PC에서 ZIP을 압축 해제하고 AI 클라이언트와 Office/CAD 프로그램을 종료한 뒤 실행합니다.
 
@@ -55,7 +55,7 @@ cd C:\Tools\DocBridge
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-mcp.ps1
 ```
 
-예상 버전은 `0.4.18`이며 검증 끝에 `모두 통과`가 나와야 합니다. 배포 무결성 검사에는 `doc-bridge-hwp-worker.exe`도 포함됩니다.
+예상 버전은 `0.4.19`이며 검증 끝에 `모두 통과`가 나와야 합니다. 배포 무결성 검사에는 `doc-bridge-hwp-worker.exe`도 포함됩니다.
 
 GitHub 기본 CI는 Office가 없어도 재현되는 테스트만 실행하고, Excel·한글·AutoCAD 실제 COM 검증은 전용 Windows self-hosted workflow에서 수동 실행합니다. 준비와 안전 규칙은 [실제 앱 E2E 운영 안내](docs/REAL-APP-E2E.md)를 참고하세요.
 
@@ -288,7 +288,8 @@ hwp_get_active_context.summary.openDocuments로 열린 한글 문서를 전부 �
 | tool이 보이지 않음 | 생성 JSON/TOML을 기존 설정에 올바르게 병합했는지 확인하고 클라이언트 재시작 |
 | Cursor에서 `doc-bridge`가 보이지 않음 | `%USERPROFILE%\.cursor\mcp.json`의 `mcpServers.doc-bridge.command`가 현재 설치 EXE 절대 경로인지 확인하고 Cursor를 완전히 재시작합니다. `2-TEST.cmd`의 `Cursor global config`와 `MCP handshake`가 [OK]인지 확인합니다. |
 | Cursor 프로젝트에서 다른 설정이 적용됨 | 프로젝트의 `.cursor\mcp.json`에 같은 이름의 서버가 중복됐는지 확인합니다. 설치기는 사용자 전역 파일만 병합하고 프로젝트 파일은 변경하지 않습니다. 한 위치의 구성만 사용하십시오. |
-| Cursor에서 CAD 레이어가 비거나 객체 상세가 바로 보이지 않음 | 기본 `cad_get_active_context(detailLevel="basic")`은 대형 도면 성능을 위해 레이어·객체 순회를 모두 생략하므로 `summary.layers:[]`가 정상입니다. `layerCount`/`entityCount`와 `coverage`를 확인하고 응답의 `nextActions`를 따르십시오. 제한 표본은 `detailLevel="summary"`, 실제 조회는 `cad_query_entities(scope="layers"|"regions"|"window")`와 layer/text/entityType 필터를 사용합니다. |
+| Cursor에서 CAD 레이어가 비거나 상태가 안 보임 | 기본 `basic`의 `layers:[]`는 조회 생략이며 `layerSummaryStatus:"omitted"`로 표시합니다. `cad_query_entities(scope="layers")`로 전체 목록을 페이지 조회하십시오. `current`는 현재 작업, `on`은 켜짐, `freeze`는 동결, `locked`는 잠금입니다. `modelVisible`은 켜지고 동결되지 않은 상태이며 뷰포트별 동결·객체 투명도는 별도입니다. `null`은 조회 불가입니다. |
+| CAD 문자가 마우스를 올릴 때만 보임 | 0.4.19는 편집 후 직접 ActiveX `Regen(acAllViewports)`를 수행합니다. `readback.displayRefresh.status`가 `failed`이면 좌표·축척 작업을 반복하지 말고 대상 도면 확인 후 `regen_document`만 dry-run → apply하십시오. 객체 색상·표시·투명도는 `includeGeometry:true`로 확인할 수 있습니다. API 갱신 성공은 육안 배치 검수가 아닙니다. |
 | startup timeout | `dotnet run` 대신 `dist\doc-bridge-mcp.exe` 절대 경로 사용 |
 | Excel 대상이 다름 | `excel_get_active_context.documentRef` 확인. 제한된 보기·모달 여부는 `excel_inspect(scope="diagnostics")`로 확인 |
 | Cursor 작업 뒤 빈 회색 Excel 창이 남음 | 구버전이 workbook 없는 context를 실행 probe로 호출했거나 Cursor가 DocBridge 실패 뒤 `openpyxl`/`DispatchEx`/PowerShell COM으로 우회한 증상입니다. 최신판 설치 후 Cursor를 완전히 재시작합니다. 최신판은 status/context/dry-run으로 Excel을 만들지 않고, 명시적 `allowOpenFile:true` 읽기만 파일 열기를 허용하며 대체 COM·파일 덮어쓰기 우회를 금지합니다. |

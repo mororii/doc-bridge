@@ -54,7 +54,10 @@ Step "발행 → $dist"
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 New-Item -ItemType Directory -Path $dist | Out-Null
 
-$publishArgs = @('-c', 'Release', '-o', $dist, '--nologo')
+# Public packages must not embed the builder's user/profile path in DLL CodeView
+# records, PDB documents or CallerFilePath strings. Local test builds keep symbols.
+$publishArgs = @('-c', 'Release', '-o', $dist, '--nologo',
+    '-p:DebugType=None', '-p:DebugSymbols=false', "-p:PathMap=$repo=/_/docbridge")
 if ($SelfContained) {
     $publishArgs += @('-r', 'win-x64', '--self-contained', 'true')
 } else {

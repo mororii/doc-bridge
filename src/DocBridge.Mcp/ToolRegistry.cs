@@ -267,8 +267,97 @@ public sealed class ToolRegistry
                     ["type"] = "array",
                     ["minItems"] = 1,
                     ["maxItems"] = 500,
-                    ["description"] = "insert_table의 표 행 배열 또는 table_set_row_heights의 [{row:0,heightMm:8.0}, ...] 배열입니다. 후자는 런타임에서 최대 100개로 제한됩니다.",
+                    ["description"] = "op별 형태가 다릅니다. insert_table은 [[\"A\",\"B\"],[\"C\",\"D\"]] 형태의 2차원 문자열 배열, table_set_row_heights는 [{row:0,heightMm:8.0}, ...] 형태입니다. 후자는 런타임에서 최대 100개로 제한됩니다.",
                 },
+                ["page"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["description"] = "set_page_setup 필수 객체. A4 예: {widthMm:210,heightMm:297,orientation:\"portrait\",leftMarginMm:20,rightMarginMm:20,topMarginMm:15,bottomMarginMm:15}.",
+                    ["properties"] = new JsonObject
+                    {
+                        ["widthMm"] = new JsonObject { ["type"] = "number", ["exclusiveMinimum"] = 0 },
+                        ["heightMm"] = new JsonObject { ["type"] = "number", ["exclusiveMinimum"] = 0 },
+                        ["orientation"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("portrait", "landscape") },
+                        ["leftMarginMm"] = new JsonObject { ["type"] = "number", ["minimum"] = 0 },
+                        ["rightMarginMm"] = new JsonObject { ["type"] = "number", ["minimum"] = 0 },
+                        ["topMarginMm"] = new JsonObject { ["type"] = "number", ["minimum"] = 0 },
+                        ["bottomMarginMm"] = new JsonObject { ["type"] = "number", ["minimum"] = 0 },
+                        ["headerMm"] = new JsonObject { ["type"] = "number", ["minimum"] = 0 },
+                        ["footerMm"] = new JsonObject { ["type"] = "number", ["minimum"] = 0 },
+                        ["gutterMm"] = new JsonObject { ["type"] = "number", ["minimum"] = 0 },
+                    },
+                },
+                ["applyTo"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["enum"] = new JsonArray("selection", "current-section", "document", "new-section"),
+                    ["description"] = "set_page_setup 적용 범위. 기본 current-section.",
+                },
+                ["type"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["enum"] = new JsonArray("line", "paragraph", "page", "section", "column"),
+                    ["description"] = "insert_break 필수 종류.",
+                },
+                ["name"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["description"] = "set_field_text에서 바꿀 한글 필드 이름.",
+                },
+                ["kind"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["enum"] = new JsonArray("header", "footer"),
+                    ["description"] = "set_header_footer_text 필수 종류.",
+                },
+                ["pages"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["enum"] = new JsonArray("both", "even", "odd"),
+                    ["description"] = "머리말/꼬리말 적용 쪽. 기본 both.",
+                },
+                ["output"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["description"] = "export_pdf의 절대 .pdf 출력 경로.",
+                },
+                ["startRow"] = new JsonObject { ["type"] = "integer", ["minimum"] = 0 },
+                ["startCol"] = new JsonObject { ["type"] = "integer", ["minimum"] = 0 },
+                ["endRow"] = new JsonObject { ["type"] = "integer", ["minimum"] = 0 },
+                ["endCol"] = new JsonObject { ["type"] = "integer", ["minimum"] = 0 },
+                ["header"] = new JsonObject
+                {
+                    ["type"] = "boolean",
+                    ["description"] = "insert_table 첫 행을 제목행으로 처리할지 여부. 기본 true.",
+                },
+                ["headerFill"] = new JsonObject { ["type"] = "string", ["description"] = "insert_table 제목행 채우기색 #RRGGBB." },
+                ["firstColumnFill"] = new JsonObject { ["type"] = "string", ["description"] = "insert_table 첫 열 채우기색 #RRGGBB." },
+                ["fontSize"] = new JsonObject { ["type"] = "number", ["minimum"] = 6, ["maximum"] = 72 },
+                ["columnWidths"] = new JsonObject
+                {
+                    ["type"] = "array",
+                    ["description"] = "insert_table 열 개수와 같은 양수 비율 배열. 예: [1,2,1].",
+                    ["items"] = new JsonObject { ["type"] = "number", ["exclusiveMinimum"] = 0 },
+                },
+                ["cellStyles"] = new JsonObject
+                {
+                    ["type"] = "array",
+                    ["description"] = "insert_table 개별 셀 스타일 배열. 각 항목은 row, col과 fill/borders/fontName/fontSize/bold/align/verticalCenter 등을 사용합니다.",
+                },
+                ["mergeCells"] = new JsonObject
+                {
+                    ["type"] = "array",
+                    ["description"] = "insert_table 수평 병합 배열. 예: [{startRow:0,startCol:0,endRow:0,endCol:2}].",
+                },
+                ["verticalCenter"] = new JsonObject { ["type"] = "boolean" },
+                ["hideAllBorders"] = new JsonObject { ["type"] = "boolean" },
+                ["format"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["enum"] = new JsonArray("arabic", "circled", "roman-upper", "roman-lower", "alpha-upper", "hangul", "chinese"),
+                    ["description"] = "insert_page_number 번호 형식.",
+                },
+                ["startNumber"] = new JsonObject { ["type"] = "integer", ["minimum"] = 1 },
                 ["cells"] = new JsonObject
                 {
                     ["type"] = "array",
@@ -310,8 +399,12 @@ public sealed class ToolRegistry
                 },
                 ["position"] = new JsonObject
                 {
-                    ["type"] = "string", ["enum"] = new JsonArray("before", "after"),
-                    ["description"] = "표 행/열 삽입 위치.",
+                    ["type"] = "string",
+                    ["enum"] = new JsonArray(
+                        "before", "after",
+                        "none", "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right",
+                        "top-outside", "bottom-outside", "top-inside", "bottom-inside"),
+                    ["description"] = "op별 위치. 표 행/열 삽입은 before|after, insert_page_number는 top-*/bottom-* 또는 none을 사용합니다.",
                 },
                 ["path"] = new JsonObject
                 {
@@ -665,19 +758,19 @@ public sealed class ToolRegistry
                             ["type"] = "string",
                             ["enum"] = new JsonArray("basic", "summary"),
                             ["default"] = "basic",
-                            ["description"] = "basic: 도면/개수/단위만 읽고 엔티티·레이어를 순회하지 않음. summary: 레이어 최대 50개와 엔티티 최대 500개 유형 표본. 전체 자료는 응답의 nextActions에 따라 cad_query_entities 사용",
+                            ["description"] = "basic: 도면/개수/단위/currentLayer만 읽음. layers:[]와 layerSummaryStatus:omitted는 레이어 없음이 아니라 조회 생략. summary: 레이어 상태 최대 50개, 엔티티 유형 표본 최대 500개. 전체는 cad_query_entities(scope=layers)와 nextActions 사용",
                         },
                     },
                 },
                 a => host.GetActiveContext("cad", a)),
 
-            new("cad_query_entities", "도면 엔티티·배치/뷰포트·레이어·XREF 조회 또는 여러 도곽 영역 일괄 검증 (AutoCAD 미실행 시 file 인자로 DXF 분석)",
+            new("cad_query_entities", "도면 엔티티·배치/뷰포트·레이어·XREF 조회. scope=layers로 모든 레이어의 current(현재 작업), on(켜짐), freeze(동결), locked(잠금), modelVisible을 구분 조회. includeGeometry로 객체 색상·표시·투명도 확인. AutoCAD 미실행 시 DXF 파일 분석.",
                 new JsonObject
                 {
                     ["type"] = "object",
                     ["properties"] = new JsonObject
                     {
-                        ["scope"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("entities", "layouts", "layers", "xrefs", "window", "regions"), ["description"] = "생략하면 entities. layers는 전체 레이어, xrefs는 XREF 상태, window는 AutoCAD 네이티브 공간선택, regions는 ModelSpace 한 번 순회로 여러 도곽을 검증" },
+                        ["scope"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("entities", "layouts", "layers", "xrefs", "window", "regions"), ["description"] = "생략하면 entities. layers는 켜짐/꺼짐·동결·잠금·현재 레이어 포함 페이지 조회(뷰포트별 동결은 미포함, null=조회 불가). xrefs는 XREF, window는 공간선택, regions는 여러 도곽 검증. truncated이면 nextStartIndex로 계속 조회" },
                         ["contains"] = new JsonObject { ["type"] = "string", ["description"] = "scope=layers 이름 포함 필터" },
                         ["startsWith"] = new JsonObject { ["type"] = "string", ["description"] = "scope=layers 이름 접두사 필터" },
                         ["regions"] = new JsonObject { ["type"] = "array", ["description"] = "scope=regions: name, bounds, 선택적 entityTypes/layer/textContains/minCount/maxCount/boundsMode 배열" },
@@ -709,7 +802,7 @@ public sealed class ToolRegistry
                 a => host.Read("cad", a)),
 
             new("cad_apply_ops", "CAD 쓰기 ops 적용. 도형·해치·수정·블록속성·배치/뷰포트·저장/출력을 ActiveX COM으로 직접 처리. XREF 클립만 AutoCAD 기본 XCLIP 명령을 사용하며 AutoLISP는 사용하지 않음.",
-                ApplyOpsSchema("cad", "activate_document, set_layer_visibility/color, move/rotate/set_text, copy_entities_between_documents, insert_xref, zoom_window, draw_entities(lwpolyline/circle/block/text/hatch/line/arc/ellipse/point/mtext/dim_aligned/dim_rotated), copy/scale/mirror/offset_entities, set_entity_properties, set_block_attributes, configure_layout, create_viewport / 고위험: save_document, plot_pdf, delete_entities*, run_script_template"),
+                ApplyOpsSchema("cad", "activate_document, regen_document(화면만 재생성; 좌표/문자 변경 없음), set_layer_visibility/color, move/rotate/set_text, copy_entities_between_documents, insert_xref, zoom_window, draw_entities(lwpolyline/circle/block/text/hatch/line/arc/ellipse/point/mtext/dim_aligned/dim_rotated), copy/scale/mirror/offset_entities, set_entity_properties, set_block_attributes, configure_layout, create_viewport / 고위험: save_document, plot_pdf, delete_entities*, run_script_template. 편집 후 배치당 자동 Regen; readback.displayRefresh 별도 확인, 실패 시 이동/축척 재실행 금지"),
                 a => host.ApplyOps("cad", a)),
         };
     }

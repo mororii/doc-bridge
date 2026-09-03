@@ -534,6 +534,7 @@ public sealed partial class CadAdapter
 
     private static JsonObject InspectLayers(dynamic doc, JsonObject args)
     {
+        string? currentLayer = CurrentLayerName(doc);
         var contains = Json.GetString(args, "contains");
         var startsWith = Json.GetString(args, "startsWith");
         var startIndex = Math.Max(0, Json.GetInt(args, "startIndex") ?? 0);
@@ -549,13 +550,8 @@ public sealed partial class CadAdapter
             var name = (string)(layer.Name ?? "");
             if (contains is not null && !name.Contains(contains, StringComparison.OrdinalIgnoreCase)) continue;
             if (startsWith is not null && !name.StartsWith(startsWith, StringComparison.OrdinalIgnoreCase)) continue;
-            var item = new JsonObject { ["index"] = index, ["name"] = name };
-            try { item["on"] = (bool)layer.LayerOn; } catch { }
-            try { item["freeze"] = (bool)layer.Freeze; } catch { }
-            try { item["locked"] = (bool)layer.Lock; } catch { }
-            try { item["plottable"] = (bool)layer.Plottable; } catch { }
-            try { item["color"] = (int)layer.Color; } catch { }
-            try { item["linetype"] = (string)layer.Linetype; } catch { }
+            var item = LayerState((object)layer, currentLayer);
+            item["index"] = index;
             layers.Add(item);
             matched++;
             if (matched >= limit) break;
@@ -572,6 +568,7 @@ public sealed partial class CadAdapter
         return new JsonObject
         {
             ["ok"] = true, ["app"] = "cad", ["scope"] = "layers", ["layers"] = layers,
+            ["currentLayer"] = currentLayer, ["layerStateSemantics"] = LayerStateSemantics(),
             ["count"] = matched, ["scanned"] = scanned, ["totalLayers"] = total,
             ["truncated"] = truncated,
             ["nextStartIndex"] = truncated ? startIndex + scanned : null,

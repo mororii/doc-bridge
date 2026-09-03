@@ -17,7 +17,7 @@ namespace DocBridge.Core.Services;
 /// </summary>
 public sealed class DocBridgeHost : IDisposable
 {
-    public const string Version = "0.4.18";
+    public const string Version = "0.4.19";
     private const string AutomationMutex = @"Global\DocBridge.Automation";
 
     private readonly DocBridgeOptions _options;
@@ -34,6 +34,7 @@ public sealed class DocBridgeHost : IDisposable
         _options.EnsureDirectories();
         _policy = new PolicyEngine(_options.PolicyPath);
         _validator = new OperationValidator(_policy);
+        ConfirmTokenService.WarmUpCrypto();
         _tokens = new ConfirmTokenService(_options, _policy.TokenTtlSeconds);
         _snapshots = new SnapshotService(_options);
         _audit = new AuditLog(_options);
@@ -490,6 +491,8 @@ public sealed class DocBridgeHost : IDisposable
             _audit.Write(tool, app, "deny", null, false, errors);
             var deny = new JsonObject { ["ok"] = false, ["dryRun"] = Json.GetBool(batch, "dryRun", true) };
             deny["errors"] = Json.ToArray(errors);
+            var expectedSchemas = _validator.DescribeExpectedSchemas(batch, app);
+            if (expectedSchemas.Count > 0) deny["expectedSchema"] = expectedSchemas;
             return Finish(deny);
         }
 
@@ -511,16 +514,73 @@ public sealed class DocBridgeHost : IDisposable
                     _audit.Write(tool, app, "deny", null, false, new[] { msg });
                     return Json.ErrorResult(msg, app);
                 }
+                // 한 호출 안에서는 방금 읽은 상태의 문서 식별자를 재사용한다. TargetDocumentRef가
+                // GetStatus()를 다시 부르지 않게 해 COM 왕복을 줄이되, dry-run과 apply 사이에는
+                // 여전히 각각 새 상태를 읽어 문서 전환을 놓치지 않는다.
+                var targetDocument = TargetDocumentRef(app, parsed.Ops, status.Document);
 
                 if (parsed.DryRun)
                 {
-                    // 2) preview (diff 계산). 실제 apply에서는 전체 문서 fingerprint가
-                    // 일치할 때 이 artifact를 재사용해 같은 분석을 반복하지 않는다.
-                    var previewStarted = Stopwatch.StartNew();
-                    var dryPreview = adapter.Preview(parsed.Ops);
-                    previewStarted.Stop();
-                    timings["previewMs"] = previewStarted.ElapsedMilliseconds;
-                    timings["previewReused"] = false;
+                    // 2) 동일 문서·동일 ops의 반복 dry-run이면 최신 스냅샷 후보를 찾는다.
+                    // 후보 메타데이터만으로 신뢰하지 않고, 전체 문서 fingerprint가 현재 상태와
+                    // 일치할 때만 preview와 snapshot을 함께 재사용한다.
+                    (SnapshotInfo Info, JsonObject Metadata)? reuseCandidate = null;
+                    ApplyPreview? dryPreview = null;
+                    var cacheLookupStarted = Stopwatch.StartNew();
+                    if (adapter is IPreviewReuseAdapter dryRunReusableAdapter)
+                    {
+                        reuseCandidate = _snapshots.FindLatestReusableCandidate(
+                            app, targetDocument, opsHash,
+                            (expected, current) => SameDocumentRef(app, expected, current));
+                        if (reuseCandidate is not null)
+                        {
+                            var reuseValidationStarted = Stopwatch.StartNew();
+                            try
+                            {
+                                var validation = dryRunReusableAdapter.ValidatePreviewReuse(
+                                    reuseCandidate.Value.Info.Dir,
+                                    reuseCandidate.Value.Metadata,
+                                    parsed.Ops);
+                                timings["dryRunFingerprintMethod"] = Json.GetString(validation, "fingerprintMethod");
+                                if (Json.GetBool(validation, "reusable"))
+                                    dryPreview = ApplyPreviewArtifact.FromMetadata(
+                                        reuseCandidate.Value.Metadata, opsHash);
+                                else
+                                    timings["dryRunCacheMissReason"] =
+                                        Json.GetString(validation, "reason") ?? "document fingerprint changed";
+                            }
+                            catch (Exception ex)
+                            {
+                                // 캐시 검증 실패는 안전하게 일반 preview+새 snapshot 경로로 내린다.
+                                timings["dryRunCacheMissReason"] = $"fingerprint validation failed: {ex.Message}";
+                            }
+                            finally
+                            {
+                                reuseValidationStarted.Stop();
+                                timings["dryRunFingerprintValidationMs"] = reuseValidationStarted.ElapsedMilliseconds;
+                            }
+                        }
+                    }
+                    cacheLookupStarted.Stop();
+                    timings["dryRunCacheLookupMs"] = cacheLookupStarted.ElapsedMilliseconds;
+
+                    if (dryPreview is null)
+                    {
+                        var previewStarted = Stopwatch.StartNew();
+                        dryPreview = adapter.Preview(parsed.Ops);
+                        previewStarted.Stop();
+                        timings["previewMs"] = previewStarted.ElapsedMilliseconds;
+                        timings["previewReused"] = false;
+                        timings["previewCacheHit"] = false;
+                        reuseCandidate = null;
+                    }
+                    else
+                    {
+                        timings["previewMs"] = 0L;
+                        timings["previewReused"] = true;
+                        timings["previewCacheHit"] = true;
+                    }
+                    AddDistinctWarnings(dryPreview.Warnings, parsed.OptimizationWarnings);
                     if (dryPreview.Errors.Count > 0)
                     {
                         _audit.Write(tool, app, "deny", null, false, dryPreview.Errors);
@@ -531,17 +591,29 @@ public sealed class DocBridgeHost : IDisposable
                         return pe;
                     }
 
-                    // 3) snapshot 생성 + 4) confirmToken 발급
+                    // 3) snapshot 생성/재사용 + 4) confirmToken 발급
                     var snapshotStarted = Stopwatch.StartNew();
-                    var info = _snapshots.Create(app, $"{tool} dry-run", TargetDocumentRef(app, adapter, parsed.Ops),
-                        (dir, meta) =>
-                        {
-                            adapter.CaptureSnapshot(dir, meta, parsed.Ops);
-                            meta["opsHash"] = opsHash;
-                            meta["previewArtifact"] = ApplyPreviewArtifact.ToJson(dryPreview);
-                        });
+                    SnapshotInfo info;
+                    if (reuseCandidate is not null)
+                    {
+                        info = reuseCandidate.Value.Info;
+                        timings["snapshotReused"] = true;
+                    }
+                    else
+                    {
+                        info = _snapshots.Create(app, $"{tool} dry-run", targetDocument,
+                            (dir, meta) =>
+                            {
+                                adapter.CaptureSnapshot(dir, meta, parsed.Ops);
+                                meta["snapshotReuseVersion"] = 1;
+                                ApplyPreviewArtifact.StoreInMetadata(meta, opsHash, dryPreview);
+                            });
+                        timings["snapshotReused"] = false;
+                    }
                     snapshotStarted.Stop();
-                    timings["snapshotMs"] = snapshotStarted.ElapsedMilliseconds;
+                    timings["snapshotMs"] = reuseCandidate is null
+                        ? snapshotStarted.ElapsedMilliseconds
+                        : 0;
                     var tokenStarted = Stopwatch.StartNew();
                     var (token, expires) = _tokens.Create(scope, opsHash, info.SnapshotId);
                     tokenStarted.Stop();
@@ -607,7 +679,7 @@ public sealed class DocBridgeHost : IDisposable
                 // 같은 토큰이 다른 문서에 적용될 수 있다.
                 var identityStarted = Stopwatch.StartNew();
                 var expectedDocument = snapshot.Value.Info.DocumentRef;
-                var currentDocument = TargetDocumentRef(app, adapter, parsed.Ops);
+                var currentDocument = targetDocument;
                 identityStarted.Stop();
                 timings["documentIdentityMs"] = identityStarted.ElapsedMilliseconds;
                 if (!SameDocumentRef(app, expectedDocument, currentDocument))
@@ -618,8 +690,7 @@ public sealed class DocBridgeHost : IDisposable
                 }
 
                 ApplyPreview? preview = null;
-                var cachedPreview = ApplyPreviewArtifact.FromJson(
-                    Json.GetObj(snapshot.Value.Metadata, "previewArtifact"));
+                var cachedPreview = ApplyPreviewArtifact.FromMetadata(snapshot.Value.Metadata, opsHash);
                 if (cachedPreview is not null && adapter is IPreviewReuseAdapter reusableAdapter)
                 {
                     var fingerprintStarted = Stopwatch.StartNew();
@@ -637,7 +708,7 @@ public sealed class DocBridgeHost : IDisposable
                     }
                     preview = cachedPreview;
                     timings["previewReused"] = true;
-                    timings["previewMs"] = 0;
+                    timings["previewMs"] = 0L;
                 }
                 else
                 {
@@ -650,6 +721,8 @@ public sealed class DocBridgeHost : IDisposable
                         ? "dry-run artifact unavailable"
                         : "adapter does not support full fingerprint validation";
                 }
+
+                AddDistinctWarnings(preview.Warnings, parsed.OptimizationWarnings);
 
                 if (preview.Errors.Count > 0)
                 {
@@ -827,6 +900,13 @@ public sealed class DocBridgeHost : IDisposable
         return a;
     }
 
+    private static void AddDistinctWarnings(List<string> target, IEnumerable<string> warnings)
+    {
+        foreach (var warning in warnings)
+            if (!target.Contains(warning, StringComparer.Ordinal))
+                target.Add(warning);
+    }
+
     private static JsonArray OperationTimingSummary(JsonArray operationResults)
     {
         var summary = new JsonArray();
@@ -851,7 +931,10 @@ public sealed class DocBridgeHost : IDisposable
         catch { return null; }
     }
 
-    private static string? TargetDocumentRef(string app, IAppAdapter adapter, IReadOnlyList<JsonObject> ops)
+    private static string? TargetDocumentRef(
+        string app,
+        IReadOnlyList<JsonObject> ops,
+        string? statusDocument = null)
     {
         if (string.Equals(app, "hwp", StringComparison.OrdinalIgnoreCase))
         {
@@ -868,7 +951,7 @@ public sealed class DocBridgeHost : IDisposable
                 .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path));
             if (workbook is not null && Path.IsPathFullyQualified(workbook)) return Path.GetFullPath(workbook);
         }
-        return CurrentDocRef(adapter);
+        return statusDocument;
     }
 
     internal static bool SameDocumentRef(string app, string? expected, string? current)

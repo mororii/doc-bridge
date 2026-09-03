@@ -70,24 +70,42 @@ public sealed partial class CadAdapter
                 if (InternalDocumentSwitched) original.Activate();
                 if (!string.IsNullOrWhiteSpace(_originalLayout))
                 {
-                    try { original.ActiveLayout = original.Layouts.Item(_originalLayout); }
+                    try
+                    {
+                        if (!string.Equals((string)original.ActiveLayout.Name, _originalLayout, StringComparison.OrdinalIgnoreCase))
+                            original.ActiveLayout = original.Layouts.Item(_originalLayout);
+                    }
                     catch { OriginalStateRestored = false; }
                 }
                 if (_originalActiveSpace is not null)
                 {
-                    try { original.ActiveSpace = _originalActiveSpace.Value; }
+                    try
+                    {
+                        if (Convert.ToInt32(original.ActiveSpace) != _originalActiveSpace.Value)
+                            original.ActiveSpace = _originalActiveSpace.Value;
+                    }
                     catch { OriginalStateRestored = false; }
                 }
                 if (_originalMSpace is not null)
                 {
-                    try { original.MSpace = _originalMSpace.Value; }
+                    try
+                    {
+                        if (Convert.ToBoolean(original.MSpace) != _originalMSpace.Value)
+                            original.MSpace = _originalMSpace.Value;
+                    }
                     catch { /* MSpace is unavailable in model space on some versions. */ }
                 }
                 if (_hasOriginalView)
                 {
                     try
                     {
-                        app.ZoomCenter(Point(_originalViewCenterX, _originalViewCenterY, 0), _originalViewSize);
+                        var center = (Array)original.GetVariable("VIEWCTR");
+                        var x = Convert.ToDouble(center.GetValue(0), CultureInfo.InvariantCulture);
+                        var y = Convert.ToDouble(center.GetValue(1), CultureInfo.InvariantCulture);
+                        var size = Convert.ToDouble(original.GetVariable("VIEWSIZE"), CultureInfo.InvariantCulture);
+                        if (Math.Abs(x - _originalViewCenterX) > 1e-8 ||
+                            Math.Abs(y - _originalViewCenterY) > 1e-8 || Math.Abs(size - _originalViewSize) > 1e-8)
+                            app.ZoomCenter(Point(_originalViewCenterX, _originalViewCenterY, 0), _originalViewSize);
                     }
                     catch { OriginalStateRestored = false; }
                 }

@@ -57,6 +57,7 @@ public sealed class OperationValidator
             ["set_header_footer_text"] = new[] { ("kind", "string"), ("text", "string") },
             ["export_pdf"] = new[] { ("output", "string") },
             ["set_layer_visibility"] = new[] { ("layer", "string"), ("visible", "bool") },
+            ["regen_document"] = Array.Empty<(string Field, string Type)>(),
             ["set_layer_color"] = new[] { ("layer", "string"), ("color", "any") },
             ["activate_document"] = new[] { ("document", "string") },
             ["move_entities"] = new[] { ("handles", "array"), ("dx", "number"), ("dy", "number") },
@@ -85,12 +86,76 @@ public sealed class OperationValidator
             ["draw_block_wall_schematic"] = Array.Empty<(string Field, string Type)>(),
         };
 
+    /// <summary>
+    /// 오류 응답에서 op별 선택 필드를 함께 안내하기 위한 최소 발견성 카탈로그.
+    /// 실제 허용 여부는 어댑터가 계속 최종 검증하며, 이 목록은 모델이 첫 재시도에서
+    /// 올바른 요청 모양을 만들 수 있도록 돕는 용도다.
+    /// </summary>
+    private static readonly Dictionary<string, string[]> OptionalFields =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["find_replace"] = new[] { "scope", "occurrence", "matchCase", "target", "file", "documentRef" },
+            ["insert_text"] = new[] { "style", "preserveStyle", "styleSource", "file", "documentRef" },
+            ["append_text"] = new[] { "startNewParagraph", "style", "preserveStyle", "styleSource", "file", "documentRef" },
+            ["insert_before_text"] = new[] { "occurrence", "matchCase", "mode", "style", "preserveStyle", "styleSource", "file", "documentRef" },
+            ["insert_after_text"] = new[] { "occurrence", "matchCase", "mode", "style", "preserveStyle", "styleSource", "file", "documentRef" },
+            ["replace_document_text"] = new[] { "style", "preserveStyle", "file", "documentRef" },
+            ["replace_selection"] = new[] { "style", "preserveStyle", "styleSource", "file", "documentRef" },
+            ["set_paragraph_style_basic"] = new[] { "target", "file", "documentRef" },
+            ["set_paragraph_format"] = new[] { "target", "file", "documentRef" },
+            ["format_paragraphs"] = new[] { "file", "documentRef" },
+            ["set_page_setup"] = new[] { "applyTo", "file", "documentRef" },
+            ["insert_break"] = new[] { "file", "documentRef" },
+            ["insert_table"] = new[]
+            {
+                "header", "headerFill", "firstColumnFill", "fontSize", "columnWidths",
+                "cellStyles", "mergeCells", "verticalCenter", "hideAllBorders", "file", "documentRef",
+            },
+            ["table_cell_set_text"] = new[] { "tableIndex", "row", "col", "cellIndex", "preserveStyle", "style", "styleSource", "file", "documentRef" },
+            ["table_set_cells"] = new[] { "tableIndex", "preserveStyle", "file", "documentRef" },
+            ["table_insert_rows"] = new[] { "tableIndex", "col", "position", "file", "documentRef" },
+            ["table_insert_columns"] = new[] { "tableIndex", "row", "position", "file", "documentRef" },
+            ["table_delete_rows"] = new[] { "tableIndex", "col", "count", "file", "documentRef" },
+            ["table_delete_columns"] = new[] { "tableIndex", "row", "count", "file", "documentRef" },
+            ["table_merge_cells"] = new[] { "tableIndex", "file", "documentRef" },
+            ["table_set_row_height"] = new[] { "tableIndex", "file", "documentRef" },
+            ["table_set_row_heights"] = new[] { "tableIndex", "file", "documentRef" },
+            ["set_field_text"] = new[] { "file", "documentRef" },
+            ["insert_picture"] = new[]
+            {
+                "tableIndex", "row", "col", "cellIndex", "clearCell", "embedded", "sizeOption",
+                "widthMm", "heightMm", "effect", "reverse", "watermark", "file", "documentRef",
+            },
+            ["insert_page_number"] = new[] { "position", "format", "startNumber", "file", "documentRef" },
+            ["set_header_footer_text"] = new[] { "pages", "file", "documentRef" },
+            ["export_pdf"] = new[] { "file", "documentRef" },
+            ["set_values"] = new[] { "target", "targetWorkbook" },
+            ["set_formulas"] = new[] { "target", "targetWorkbook" },
+            ["format_range"] = new[] { "target", "targetWorkbook" },
+            ["merge_cells"] = new[] { "target", "targetWorkbook" },
+            ["unmerge_cells"] = new[] { "target", "targetWorkbook" },
+            ["copy_sheet"] = new[] { "targetSheet", "targetWorkbook" },
+        };
+
+    private static readonly Dictionary<(string Op, string Field), string> FieldExpectations = new()
+    {
+        [("insert_table", "rows")] = "array of row arrays, e.g. [[\"A\",\"B\"],[\"C\",\"D\"]]",
+        [("table_set_row_heights", "rows")] = "array of objects, e.g. [{\"row\":0,\"heightMm\":8.0}]",
+        [("table_set_cells", "cells")] = "array of cell objects, e.g. [{\"row\":0,\"col\":0,\"text\":\"A\"}]",
+        [("format_paragraphs", "items")] = "array of format objects with target and characterStyle and/or paragraphStyle",
+        [("set_page_setup", "page")] = "object, e.g. {\"widthMm\":210,\"heightMm\":297,\"orientation\":\"portrait\"}",
+        [("draw_entities", "entities")] = "array of CAD entity objects",
+        [("set_values", "values")] = "2D array of cell values, e.g. [[1,2],[3,4]]",
+        [("set_formulas", "formulas")] = "2D array of formula strings, e.g. [[\"=SUM(A1:A2)\"]]",
+    };
+
     public sealed record ParsedBatch(
         List<JsonObject> Ops,
         bool DryRun,
         string? ConfirmToken,
         bool HighRiskConfirm,
-        bool HasHighRiskOps);
+        bool HasHighRiskOps,
+        IReadOnlyList<string> OptimizationWarnings);
 
     public ParsedBatch? Validate(JsonObject? batch, string app, List<string> errors)
     {
@@ -188,14 +253,51 @@ public sealed class OperationValidator
         var highRiskConfirm = Json.GetBool(batch, "highRiskConfirm", false);
 
         if (errors.Count > 0) return null;
-        return new ParsedBatch(ops, dryRun, confirmToken, highRiskConfirm, hasHighRisk);
+        return new ParsedBatch(
+            ops, dryRun, confirmToken, highRiskConfirm, hasHighRisk,
+            BuildOptimizationWarnings(app, ops));
+    }
+
+    /// <summary>
+    /// 검증 실패 응답에 동봉할 op별 기계 판독 가능한 필드 목록.
+    /// 인덱스는 사용자 오류 메시지와 맞추기 위해 1부터 시작한다.
+    /// </summary>
+    public JsonArray DescribeExpectedSchemas(JsonObject? batch, string app)
+    {
+        var result = new JsonArray();
+        var ops = Json.GetArr(batch, "ops");
+        if (ops is null) return result;
+
+        for (var index = 0; index < ops.Count; index++)
+        {
+            if (ops[index] is not JsonObject op) continue;
+            var opName = Json.GetString(op, "op");
+            if (string.IsNullOrWhiteSpace(opName) || !RequiredFields.TryGetValue(opName, out var rules))
+                continue;
+
+            var required = new JsonObject();
+            foreach (var (field, type) in rules)
+                required[field] = ExpectedFieldDescription(opName, field, type);
+
+            var optional = OptionalFields.TryGetValue(opName, out var fields)
+                ? fields
+                : CommonOptionalFields(app);
+            result.Add(new JsonObject
+            {
+                ["index"] = index + 1,
+                ["op"] = opName,
+                ["required"] = required,
+                ["optional"] = Json.ToArray(optional),
+            });
+        }
+        return result;
     }
 
     private static void ValidateField(JsonObject op, int index, string opName, string field, string type, List<string> errors)
     {
         if (!op.TryGetPropertyValue(field, out var v) || v is null)
         {
-            errors.Add($"ops[{index}] '{opName}' requires field '{field}'");
+            errors.Add($"ops[{index}] '{opName}' requires field '{field}' ({ExpectedFieldDescription(opName, field, type)})");
             return;
         }
         var bad = type switch
@@ -208,7 +310,55 @@ public sealed class OperationValidator
             "object" => v is not JsonObject,
             _ => false, // "any"
         };
-        if (bad) errors.Add($"ops[{index}] '{opName}' field '{field}' must be {type}");
+        if (bad)
+            errors.Add($"ops[{index}] '{opName}' field '{field}' must be {ExpectedFieldDescription(opName, field, type)}");
+    }
+
+    private static string ExpectedFieldDescription(string opName, string field, string type) =>
+        FieldExpectations.TryGetValue((opName, field), out var expectation)
+            ? expectation
+            : type switch
+            {
+                "string" => "string",
+                "int" => "integer",
+                "number" => "number",
+                "bool" => "boolean",
+                "array" => "array",
+                "object" => "object",
+                _ => "value",
+            };
+
+    private static string[] CommonOptionalFields(string app) => app.ToLowerInvariant() switch
+    {
+        "hwp" => new[] { "file", "documentRef" },
+        "excel" => new[] { "target", "targetWorkbook" },
+        "cad" => new[] { "document" },
+        _ => Array.Empty<string>(),
+    };
+
+    private static IReadOnlyList<string> BuildOptimizationWarnings(string app, IReadOnlyList<JsonObject> ops)
+    {
+        var warnings = new List<string>();
+        if (!app.Equals("hwp", StringComparison.OrdinalIgnoreCase)) return warnings;
+
+        for (var start = 0; start < ops.Count;)
+        {
+            var name = Json.GetString(ops[start], "op");
+            var tableIndex = Json.GetInt(ops[start], "tableIndex") ?? 0;
+            var end = start + 1;
+            while (end < ops.Count &&
+                   string.Equals(Json.GetString(ops[end], "op"), name, StringComparison.OrdinalIgnoreCase) &&
+                   (Json.GetInt(ops[end], "tableIndex") ?? 0) == tableIndex)
+                end++;
+
+            var count = end - start;
+            if (string.Equals(name, "table_set_row_height", StringComparison.OrdinalIgnoreCase) && count >= 3)
+                warnings.Add(
+                    $"ops[{start + 1}..{end}] contains {count} consecutive table_set_row_height operations for table {tableIndex}; " +
+                    "use one table_set_row_heights op with rows:[{row,heightMm}, ...] to avoid repeated COM validation cycles");
+            start = end;
+        }
+        return warnings;
     }
 
     private static void ValidateExcelTarget(JsonObject op, int index, string opName, List<string> errors)

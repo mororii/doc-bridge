@@ -9,7 +9,7 @@ namespace DocBridge.Core.Services;
 /// </summary>
 public static class ApplyPreviewArtifact
 {
-    public const int Version = 1;
+    public const int Version = 2;
 
     public static JsonObject ToJson(ApplyPreview preview) => new()
     {
@@ -20,15 +20,31 @@ public static class ApplyPreviewArtifact
         ["requiresHighRiskApproval"] = preview.RequiresHighRiskApproval,
         ["warnings"] = Json.ToArray(preview.Warnings),
         ["errors"] = Json.ToArray(preview.Errors),
+        ["interaction"] = preview.Interaction?.DeepClone(),
     };
+
+    public static void StoreInMetadata(JsonObject metadata, string opsHash, ApplyPreview preview)
+    {
+        metadata["opsHash"] = opsHash;
+        metadata["previewArtifact"] = ToJson(preview);
+    }
+
+    public static ApplyPreview? FromMetadata(JsonObject metadata, string opsHash)
+    {
+        if (!string.Equals(Json.GetString(metadata, "opsHash"), opsHash, StringComparison.Ordinal))
+            return null;
+        return FromJson(Json.GetObj(metadata, "previewArtifact"));
+    }
 
     public static ApplyPreview? FromJson(JsonObject? artifact)
     {
-        if (artifact is null || Json.GetInt(artifact, "version") != Version) return null;
+        var version = Json.GetInt(artifact, "version");
+        if (artifact is null || version is not (1 or Version)) return null;
         var preview = new ApplyPreview
         {
             DiffTruncated = Json.GetBool(artifact, "diffTruncated"),
             RequiresHighRiskApproval = Json.GetBool(artifact, "requiresHighRiskApproval"),
+            Interaction = Json.GetObj(artifact, "interaction")?.DeepClone() as JsonObject,
         };
         foreach (var node in Json.GetArr(artifact, "affected") ?? new JsonArray())
         {

@@ -89,4 +89,33 @@ public sealed class SnapshotService
             }
         return null;
     }
+
+    /// <summary>
+    /// 동일 문서·동일 ops의 반복 dry-run에 사용할 수 있는 가장 최근 스냅샷 후보를 찾는다.
+    /// 여기서는 파일 메타데이터 키만 비교한다. 실제 문서 fingerprint 일치는 호출자가
+    /// IPreviewReuseAdapter.ValidatePreviewReuse로 다시 검증해야 한다.
+    ///
+    /// opsHash까지 키에 포함하는 이유는 일부 어댑터의 rollback payload가 operation-scoped이기
+    /// 때문이다. 다른 ops 사이에서 스냅샷을 공유해 성능을 얻는 대신 복원 정확성을 잃지 않는다.
+    /// </summary>
+    public (SnapshotInfo Info, JsonObject Metadata)? FindLatestReusableCandidate(
+        string app,
+        string? documentRef,
+        string opsHash,
+        Func<string?, string?, bool> sameDocument,
+        int searchLimit = 20)
+    {
+        foreach (var info in List(app, Math.Clamp(searchLimit, 1, 100)))
+        {
+            var found = Get(info.SnapshotId);
+            if (found is null) continue;
+            var metadata = found.Value.Metadata;
+            if (Json.GetInt(metadata, "snapshotReuseVersion") != 1) continue;
+            if (!string.Equals(Json.GetString(metadata, "opsHash"), opsHash, StringComparison.Ordinal)) continue;
+            if (!sameDocument(found.Value.Info.DocumentRef, documentRef)) continue;
+            if (ApplyPreviewArtifact.FromMetadata(metadata, opsHash) is null) continue;
+            return found;
+        }
+        return null;
+    }
 }

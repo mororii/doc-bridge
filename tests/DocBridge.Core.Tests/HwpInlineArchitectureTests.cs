@@ -24,8 +24,11 @@ public sealed class HwpInlineArchitectureTests
         preview.Affected.Add(new AffectedRef("table", "table:0"));
         preview.Diff.Add(new DiffEntry { Ref = "table:0/cell:0", Before = "a", After = "b" });
         preview.Warnings.Add("warning");
+        preview.Interaction = new JsonObject { ["policy"] = "preserve-foreground" };
 
-        var restored = ApplyPreviewArtifact.FromJson(ApplyPreviewArtifact.ToJson(preview));
+        var metadata = new JsonObject();
+        ApplyPreviewArtifact.StoreInMetadata(metadata, "ops-hash", preview);
+        var restored = ApplyPreviewArtifact.FromMetadata(metadata, "ops-hash");
 
         Assert.NotNull(restored);
         Assert.True(restored!.DiffTruncated);
@@ -33,6 +36,8 @@ public sealed class HwpInlineArchitectureTests
         Assert.Single(restored.Affected);
         Assert.Single(restored.Diff);
         Assert.Single(restored.Warnings);
+        Assert.Equal("preserve-foreground", Json.GetString(restored.Interaction, "policy"));
+        Assert.Null(ApplyPreviewArtifact.FromMetadata(metadata, "different-ops"));
     }
 
     [Fact]

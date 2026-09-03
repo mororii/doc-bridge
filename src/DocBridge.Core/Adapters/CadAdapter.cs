@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using DocBridge.Core.Models;
@@ -21,7 +23,7 @@ namespace DocBridge.Core.Adapters;
 /// ※ 실측 기반: 이 PC AutoCAD 26.0에서 Layers.Add/LayerOn/Color/AddText/
 ///   HandleToObject/TextString/SaveAs 동작을 확인하고 구현했다.
 /// </summary>
-public sealed partial class CadAdapter : ComAdapterBase
+public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
 {
     private const int MaxContextSummaryEntities = 500;
     private const int MaxQueryEntities = 5000;
@@ -235,6 +237,8 @@ public sealed partial class CadAdapter : ComAdapterBase
         if (TryBoundingBox((object)ent, out var minX, out var minY, out var maxX, out var maxY))
             item["bounds"] = new JsonObject { ["minX"] = minX, ["minY"] = minY, ["maxX"] = maxX, ["maxY"] = maxY };
         if (!includeGeometry) return item;
+
+        AddEntityDisplayState((object)ent, item);
 
         try { item["insertionPoint"] = PointJson((object?)ent.InsertionPoint); } catch { }
         try { item["position"] = PointJson((object?)ent.Position); } catch { }
@@ -1852,7 +1856,7 @@ public sealed partial class CadAdapter : ComAdapterBase
         },
         ["readOps"] = new JsonArray("context", "entities", "layouts", "layers", "xrefs", "window", "regions", "dxf-fallback"),
         ["writeOps"] = new JsonArray(
-            "activate_document", "set_layer_visibility", "set_layer_color", "move_entities",
+            "activate_document", "regen_document", "set_layer_visibility", "set_layer_color", "move_entities",
             "rotate_entities", "set_text_value", "copy_entities_between_documents", "insert_xref",
             "zoom_window", "draw_entities", "copy_entities", "scale_entities", "mirror_entities",
             "offset_entities", "set_entity_properties", "set_block_attributes",
@@ -1953,14 +1957,14 @@ public sealed partial class CadAdapter : ComAdapterBase
                 var layerCount = 0;
                 try { layerCount = Convert.ToInt32(doc.Layers.Count, CultureInfo.InvariantCulture); } catch { }
                 var layers = new JsonArray();
+                string? currentLayer = CurrentLayerName(doc);
+                r.Summary["currentLayer"] = currentLayer;
+                r.Summary["layerStateSemantics"] = LayerStateSemantics();
                 if (detailLevel == "summary")
                 {
                     foreach (dynamic layer in doc.Layers)
                     {
-                        var item = new JsonObject();
-                        try { item["name"] = (string)layer.Name; } catch { }
-                        try { item["on"] = (bool)layer.LayerOn; } catch { }
-                        try { item["color"] = (int)layer.Color; } catch { }
+                        var item = LayerState((object)layer, currentLayer);
                         layers.Add(item);
                         if (layers.Count >= MaxContextLayers) break;
                     }
@@ -1969,6 +1973,8 @@ public sealed partial class CadAdapter : ComAdapterBase
                 r.Summary["layerCount"] = layerCount;
                 r.Summary["layersTruncated"] = layerCount > layers.Count;
                 r.Summary["layerPreviewIncluded"] = detailLevel == "summary";
+                r.Summary["layerSummaryStatus"] = detailLevel == "basic" ? "omitted" :
+                    layerCount > layers.Count ? "sampled" : "complete";
                 if (detailLevel == "summary" && layerCount > layers.Count)
                     r.Warnings.Add($"활성 컨텍스트는 레이어 {layers.Count}/{layerCount}개만 반환했습니다. 전체 목록은 cad_query_entities(scope=layers)를 사용하세요.");
 
@@ -2296,6 +2302,9 @@ public sealed partial class CadAdapter : ComAdapterBase
                     var name = Json.GetString(op, "op")!;
                     switch (name)
                     {
+                        case "regen_document":
+                            p.Affected.Add(new AffectedRef("display", "Regen all viewports; geometry unchanged"));
+                            break;
                         case "activate_document":
                         {
                             var selector = Json.GetString(op, "document")!;
@@ -2698,9 +2707,11 @@ public sealed partial class CadAdapter : ComAdapterBase
 
     public override ApplyExecution Apply(IReadOnlyList<JsonObject> ops, string snapshotId)
     {
-        return ComInvokeWithRetry(() =>
+        // A batch is not idempotent: retrying from the beginning can move/scale twice.
+        return ComInvoke(() =>
         {
             var exec = new ApplyExecution { Ok = true };
+            var displayRefresh = new CadDisplayRefresh();
             var checkedCount = 0;
             var mismatches = new List<string>();
             var foreground = new ForegroundInteractionGuard(App);
@@ -2724,8 +2735,13 @@ public sealed partial class CadAdapter : ComAdapterBase
                     var opOk = false;
                     try
                     {
+                      if (name is not ("activate_document" or "save_document" or "plot_pdf" or "zoom_window"))
+                          displayRefresh.Track((object)doc);
                       switch (name)
                       {
+                        case "regen_document":
+                            exec.Affected.Add(new AffectedRef("display", "queued all-viewport regeneration"));
+                            break;
                         case "activate_document":
                         {
                             var selector = Json.GetString(op, "document")!;
@@ -3217,7 +3233,6 @@ public sealed partial class CadAdapter : ComAdapterBase
                     }
                 }
 
-                    catch (Exception ex) when (IsCallRejected(ex)) { throw; }
                     catch (Exception ex)
                     {
                         opError = ex.Message;
@@ -3256,9 +3271,15 @@ public sealed partial class CadAdapter : ComAdapterBase
                 };
                 exec.Ok = mismatches.Count == 0 && !userActivityInterrupted;
             }
-            catch (Exception ex) when (IsCallRejected(ex)) { throw; }
             catch (Exception ex) { exec.Ok = false; exec.Errors.Add($"apply failed: {ex.Message}"); }
-            finally { exec.Interaction = CompleteCadInteraction(foreground, documentState); }
+            finally
+            {
+                // Restore the view first, then regenerate once per touched drawing before
+                // the foreground guard completes. Never replay edits on a Regen failure.
+                documentState.Restore();
+                displayRefresh.Complete(exec);
+                exec.Interaction = CompleteCadInteraction(foreground, documentState);
+            }
             return exec;
         }, timeoutSec: 600);
     }
@@ -3277,6 +3298,8 @@ public sealed partial class CadAdapter : ComAdapterBase
 
             string fullName = "";
             try { fullName = (string)(doc.FullName ?? ""); } catch { }
+            var savedAtSnapshot = false;
+            try { savedAtSnapshot = (bool)doc.Saved; } catch { }
             if (!string.IsNullOrEmpty(fullName) && File.Exists(fullName))
             {
                 var dest = Path.Combine(snapshotDir, "drawing-backup" + Path.GetExtension(fullName));
@@ -3286,6 +3309,7 @@ public sealed partial class CadAdapter : ComAdapterBase
                     using var dst = new FileStream(dest, FileMode.Create, FileAccess.Write);
                     src.CopyTo(dst);
                     metadata["drawingBackup"] = Path.GetFileName(dest);
+                    metadata["fileSha256"] = CadFileHash(dest);
                 }
                 catch (Exception ex) { metadata["drawingBackupError"] = ex.Message; }
             }
@@ -3318,7 +3342,196 @@ public sealed partial class CadAdapter : ComAdapterBase
                 }.ToJsonString(Json.Pretty));
             metadata["payload"] = "drawing-backup + state.json";
             metadata["documentRef"] = string.IsNullOrEmpty(fullName) ? metadata["documentRef"] : fullName;
+            metadata["savedAtSnapshot"] = savedAtSnapshot;
+            if (ops is { Count: > 0 })
+            {
+                metadata["operationStateSha256"] = CadOperationStateHash(doc, ops);
+                metadata["operationStateVersion"] = 2;
+            }
         });
+    }
+
+    /// <summary>
+    /// 저장 완료된 DWG는 전체 파일 SHA-256으로, 이미 dirty였던 열린 DWG는 작업 대상
+    /// 핸들/레이어의 메모리 상태 SHA-256으로 preview/snapshot 재사용을 검증한다.
+    /// dirty 도면을 무조건 거부하면 정상적인 dry-run -> apply가 영구히 불가능해지므로,
+    /// 작업 범위 상태가 그대로인지 확인하는 보수적 폴백을 사용한다.
+    /// </summary>
+    public JsonObject ValidatePreviewReuse(
+        string snapshotDir, JsonObject metadata, IReadOnlyList<JsonObject> ops)
+    {
+        return ComInvokeWithRetry(() =>
+        {
+            var app = AttachCad();
+            if (app is null)
+                return new JsonObject { ["ok"] = true, ["reusable"] = false, ["reason"] = "AutoCAD is not running" };
+            dynamic cad = app;
+            var doc = ActiveDocWait(cad);
+            if (doc is null)
+                return new JsonObject { ["ok"] = true, ["reusable"] = false, ["reason"] = "AutoCAD drawing is not open" };
+
+            string fullName = "";
+            try { fullName = (string)(doc.FullName ?? ""); } catch { }
+            var expectedDocument = Json.GetString(metadata, "documentRef") ?? "";
+            if (string.IsNullOrWhiteSpace(fullName) || string.IsNullOrWhiteSpace(expectedDocument) ||
+                !string.Equals(Path.GetFullPath(fullName), Path.GetFullPath(expectedDocument), StringComparison.OrdinalIgnoreCase))
+                return new JsonObject
+                {
+                    ["ok"] = true,
+                    ["reusable"] = false,
+                    ["fingerprintMethod"] = "cad-saved-file-sha256",
+                    ["reason"] = "active AutoCAD document identity changed after dry-run",
+                };
+
+            var saved = false;
+            try { saved = (bool)doc.Saved; } catch { }
+            var savedAtSnapshot = Json.GetBool(metadata, "savedAtSnapshot");
+            if (!savedAtSnapshot)
+            {
+                var expectedState = Json.GetString(metadata, "operationStateSha256");
+                if (Json.GetInt(metadata, "operationStateVersion") != 2 || string.IsNullOrWhiteSpace(expectedState))
+                    return new JsonObject
+                    {
+                        ["ok"] = true,
+                        ["reusable"] = false,
+                        ["fingerprintMethod"] = "cad-operation-state-sha256",
+                        ["reason"] = "dirty AutoCAD operation cannot be safely fingerprinted; save the target drawing and run a new dry-run",
+                    };
+
+                var currentState = CadOperationStateHash(doc, ops);
+                var stateReusable = string.Equals(expectedState, currentState, StringComparison.OrdinalIgnoreCase);
+                return new JsonObject
+                {
+                    ["ok"] = true,
+                    ["reusable"] = stateReusable,
+                    ["fingerprintMethod"] = "cad-operation-state-sha256",
+                    ["reason"] = stateReusable
+                        ? "dirty DWG operation-state fingerprint matched"
+                        : "dirty DWG operation target changed after dry-run",
+                };
+            }
+
+            if (!saved)
+                return new JsonObject
+                {
+                    ["ok"] = true,
+                    ["reusable"] = false,
+                    ["fingerprintMethod"] = "cad-saved-file-sha256",
+                    ["reason"] = "saved DWG acquired unsaved changes after dry-run",
+                };
+
+            var expected = Json.GetString(metadata, "fileSha256");
+            if (string.IsNullOrWhiteSpace(expected) || !File.Exists(fullName))
+                return new JsonObject
+                {
+                    ["ok"] = true,
+                    ["reusable"] = false,
+                    ["fingerprintMethod"] = "cad-saved-file-sha256",
+                    ["reason"] = "saved DWG fingerprint is unavailable",
+                };
+
+            var current = CadFileHash(fullName);
+            var reusable = string.Equals(expected, current, StringComparison.OrdinalIgnoreCase);
+            return new JsonObject
+            {
+                ["ok"] = true,
+                ["reusable"] = reusable,
+                ["fingerprintMethod"] = "cad-saved-file-sha256",
+                ["reason"] = reusable ? "saved DWG fingerprint matched" : "saved DWG changed after dry-run",
+            };
+        });
+    }
+
+    private static string CadFileHash(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
+    private static string? CadOperationStateHash(dynamic doc, IReadOnlyList<JsonObject> ops)
+    {
+        var state = new StringBuilder(4096);
+        string documentName = "";
+        try { documentName = (string)(doc.FullName ?? doc.Name ?? ""); } catch { }
+        state.Append("document=").Append(documentName).Append('\n');
+        try { state.Append("modelSpaceCount=").Append((int)doc.ModelSpace.Count).Append('\n'); } catch { }
+
+        var handles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var layers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var op in ops)
+        {
+            var opName = Json.GetString(op, "op");
+            // A handle-only digest cannot validate a region, external source, block,
+            // layout or arbitrary geometry. Do not bless unsupported dirty previews.
+            if (opName == "activate_document")
+            {
+                var selector = Json.GetString(op, "document");
+                if (selector is null || !(DocumentMatches(documentName, selector) ||
+                    DocumentMatches((string)doc.Name, selector))) return null;
+            }
+            else if (opName is not ("regen_document" or "set_layer_visibility" or "set_layer_color" or
+                "move_entities" or "rotate_entities" or "scale_entities" or "set_text_value")) return null;
+            state.Append("op=").Append(opName ?? "").Append('\n');
+            var handle = Json.GetString(op, "handle");
+            if (!string.IsNullOrWhiteSpace(handle)) handles.Add(handle);
+            if (Json.GetArr(op, "handles") is { } handleArray)
+                foreach (var node in handleArray)
+                {
+                    var value = node?.GetValue<string>();
+                    if (!string.IsNullOrWhiteSpace(value)) handles.Add(value);
+                }
+            var layer = Json.GetString(op, "layer");
+            if (!string.IsNullOrWhiteSpace(layer)) layers.Add(layer);
+        }
+
+        foreach (var layerName in layers.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        {
+            state.Append("layer=").Append(layerName).Append('|');
+            try
+            {
+                dynamic layer = doc.Layers.Item(layerName);
+                state.Append((bool)layer.LayerOn).Append('|')
+                    .Append((bool)layer.Freeze).Append('|')
+                    .Append((bool)layer.Lock).Append('|')
+                    .Append((int)layer.Color);
+            }
+            catch { return null; }
+            state.Append('\n');
+        }
+
+        foreach (var handle in handles.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        {
+            state.Append("entity=").Append(handle).Append('|');
+            try
+            {
+                dynamic entity = doc.HandleToObject(handle);
+                // Text-only fallback. Curves can change vertices without changing bbox.
+                if ((string)entity.EntityName is not ("AcDbText" or "AcDbMText")) return null;
+                var geometry = EntityJson(entity, -1, includeGeometry: true);
+                if (geometry["bounds"] is null || geometry["height"] is null || geometry["rotation"] is null ||
+                    geometry["insertionPoint"] is null) return null;
+                state.Append(geometry.ToJsonString()).Append('|');
+                try { state.Append((string)entity.EntityName); } catch { }
+                state.Append('|');
+                try { state.Append((string)entity.Layer); } catch { }
+                state.Append('|').Append(TextOf(entity)).Append('|');
+                try { state.Append(Convert.ToDouble(entity.Height, CultureInfo.InvariantCulture).ToString("R", CultureInfo.InvariantCulture)); } catch { }
+                state.Append('|');
+                try { state.Append(Convert.ToDouble(entity.Rotation, CultureInfo.InvariantCulture).ToString("R", CultureInfo.InvariantCulture)); } catch { }
+                state.Append('|');
+                try { state.Append(PointJson((object?)entity.InsertionPoint).ToJsonString()); } catch { }
+                state.Append('|');
+                if (TryBoundingBox((object)entity, out var minX, out var minY, out var maxX, out var maxY))
+                    state.Append(minX.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+                        .Append(minY.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+                        .Append(maxX.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+                        .Append(maxY.ToString("R", CultureInfo.InvariantCulture));
+            }
+            catch { return null; }
+            state.Append('\n');
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(state.ToString()))).ToLowerInvariant();
     }
 
     public override JsonObject RestoreSnapshot(string snapshotDir, JsonObject metadata)

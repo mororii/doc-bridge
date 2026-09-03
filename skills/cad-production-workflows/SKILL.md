@@ -28,6 +28,7 @@ description: AutoCAD DWG/DXF에서 도형·치수·문자·해치 작성, 객체
 ## 분석을 먼저 한다
 
 - `cad_get_active_context`의 `coverage`, `entitySummaryStatus`, `nextActions`를 먼저 확인한다. `basic`의 `entitySummaryStatus:"omitted"` 또는 빈 `layers`를 도면에 객체/레이어가 없다는 뜻으로 해석하지 않는다.
+- 레이어 켜짐/꺼짐은 `cad_query_entities({"scope":"layers"})`의 `on`, 동결은 `freeze`, 잠금은 `locked`로 확인한다. `current`는 현재 작업 레이어이며 표시 여부와 다르다. `modelVisible`은 `on && !freeze`이고 뷰포트별 동결/객체 투명도/가림까지 보장하지 않는다. `null`은 조회 불가다. `layerSummaryStatus:"omitted"`이면 목록을 조회하고, `truncated`이면 끝까지 페이지를 읽는다.
 - 큰 도면은 컨텍스트 표본으로 결론내리지 않고 `countOnly`, 레이어·유형·문자·bounds 필터와 `nextStartIndex`를 사용한다. `truncated:true`이면 응답의 실행 가능한 `nextActions[].arguments`로 계속 조회한다.
 - 도곽이 여러 개면 `scope:"regions"`에 최대 100개 영역을 넣어 한 번에 객체수·유형·실제 bbox를 구한다.
 - `scope:"regions"`의 각 영역은 핸들 표본을 최대 20개만 반환한다. `sampleCoverage.truncated:true`이면 그 영역의 `nextActions`가 제시하는 `scope:"window"` 조회로 실제 객체를 가져온다.
@@ -41,6 +42,12 @@ description: AutoCAD DWG/DXF에서 도형·치수·문자·해치 작성, 객체
 - 레이어·색·선종류·선종류 축척·선가중치·표시는 `set_entity_properties`로 한 번에 변경한다.
 - 도곽 블록의 제목·도면번호·축척은 가능하면 `set_block_attributes`로 태그를 정확히 지정한다. 일반 문자일 때만 `set_text_value`를 쓴다.
 - 문서 간 객체는 `copy_entities_between_documents`의 typed ActiveX `CopyObjects` 경로를 쓴다.
+
+## 편집 후 표시 문제
+
+- 문자가 마우스를 올릴 때만 보이면 위치/크기/색상을 임의로 다시 바꾸지 않는다. 핸들 재조회(`includeGeometry:true`)로 실제 문자·좌표·색상·visible·transparency와 레이어 상태를 먼저 확인한다.
+- 쓰기 후 `readback.displayRefresh.status`를 확인한다. 자동 `Regen(acAllViewports)`가 실패하면 이미 적용된 move/scale을 반복하지 말고 `activate_document` + `regen_document`만 별도 dry-run → apply한다. 재생성은 좌표·문자 내용·색상을 변경하지 않는다.
+- `readback.verified`는 데이터 검증, `displayRefresh:completed`는 API 갱신 완료다. 둘 다 눈으로 확인한 배치 품질/겹침 없음의 증거가 아니다. PDF 검수나 사용자의 화면 확인을 구분해서 보고한다.
 
 ## 배치와 출력
 

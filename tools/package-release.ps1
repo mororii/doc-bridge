@@ -141,6 +141,25 @@ $buildInfo = [ordered]@{
     -Mode NormalizePowerShell -Path $stage
 if ($LASTEXITCODE -ne 0) { throw "PowerShell encoding normalization failed (exit $LASTEXITCODE)." }
 
+# Source scans cannot see binary debug metadata. Reject exact local build/profile
+# paths in both UTF-8 and UTF-16 before checksums or public release assets exist.
+$privateBuildPaths = @($repo, [Environment]::GetFolderPath('UserProfile')) |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    ForEach-Object { $_; $_.Replace('\', '/') }
+foreach ($packageFile in Get-ChildItem -LiteralPath $stage -Recurse -File) {
+    $bytes = [System.IO.File]::ReadAllBytes($packageFile.FullName)
+    foreach ($encoding in @([System.Text.Encoding]::UTF8, [System.Text.Encoding]::Unicode)) {
+        $decoded = $encoding.GetString($bytes)
+        foreach ($privatePath in $privateBuildPaths) {
+            if ($decoded.IndexOf($privatePath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $relative = $packageFile.FullName.Substring($stage.Length + 1)
+                throw "Package contains a local build/profile path: $relative"
+            }
+        }
+    }
+}
+Write-Host 'Package local build/profile path scan passed (including binaries).'
+
 $hashLines = Get-ChildItem -LiteralPath $stage -Recurse -File | Sort-Object FullName | ForEach-Object {
     $relative = $_.FullName.Substring($stage.Length + 1).Replace('\', '/')
     $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

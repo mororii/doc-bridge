@@ -264,6 +264,66 @@ public class OperationValidatorTests
     }
 
     [Fact]
+    public void Validation_reports_all_schema_errors_and_machine_readable_expectations()
+    {
+        var batch = Json.ParseObject("""
+        {
+          "ops": [
+            { "op": "insert_table", "rows": 2 },
+            { "op": "set_page_setup" }
+          ],
+          "dryRun": true
+        }
+        """);
+        var errors = new List<string>();
+
+        Assert.Null(_v.Validate(batch, "hwp", errors));
+        Assert.Equal(2, errors.Count);
+        Assert.Contains(errors, error =>
+            error.Contains("array of row arrays", StringComparison.Ordinal) &&
+            error.Contains("[[\"A\",\"B\"]", StringComparison.Ordinal));
+        Assert.Contains(errors, error =>
+            error.Contains("requires field 'page'", StringComparison.Ordinal) &&
+            error.Contains("widthMm", StringComparison.Ordinal));
+
+        var schemas = _v.DescribeExpectedSchemas(batch, "hwp");
+        Assert.Equal(2, schemas.Count);
+        var insertTable = Assert.IsType<JsonObject>(schemas[0]);
+        Assert.Equal(1, Json.GetInt(insertTable, "index"));
+        Assert.Contains("array of row arrays",
+            Json.GetString(Json.GetObj(insertTable, "required"), "rows"));
+        Assert.Contains(Json.GetArr(insertTable, "optional")!, node =>
+            node!.GetValue<string>() == "columnWidths");
+        var pageSetup = Assert.IsType<JsonObject>(schemas[1]);
+        Assert.Contains("orientation",
+            Json.GetString(Json.GetObj(pageSetup, "required"), "page"));
+    }
+
+    [Fact]
+    public void Consecutive_scalar_row_height_ops_recommend_bulk_operation()
+    {
+        var batch = Json.ParseObject("""
+        {
+          "ops": [
+            { "op": "table_set_row_height", "tableIndex": 2, "row": 0, "heightMm": 8 },
+            { "op": "table_set_row_height", "tableIndex": 2, "row": 1, "heightMm": 9 },
+            { "op": "table_set_row_height", "tableIndex": 2, "row": 2, "heightMm": 10 }
+          ],
+          "dryRun": true
+        }
+        """);
+        var errors = new List<string>();
+
+        var parsed = _v.Validate(batch, "hwp", errors);
+
+        Assert.NotNull(parsed);
+        Assert.Empty(errors);
+        var warning = Assert.Single(parsed!.OptimizationWarnings);
+        Assert.Contains("table_set_row_heights", warning);
+        Assert.Contains("ops[1..3]", warning);
+    }
+
+    [Fact]
     public void Empty_ops_fails()
     {
         var batch = Json.ParseObject("""{ "ops": [], "dryRun": true }""");
@@ -503,5 +563,33 @@ public class SnapshotServiceTests : IDisposable
     {
         var svc = new SnapshotService(_home.Options);
         Assert.Null(svc.Get("no-such-snapshot"));
+    }
+
+    [Fact]
+    public void Reusable_candidate_requires_same_document_ops_and_preview_artifact()
+    {
+        var svc = new SnapshotService(_home.Options);
+        const string opsHash = "ops-123";
+        var preview = new ApplyPreview();
+        preview.Affected.Add(new AffectedRef("cell", "A1"));
+        var info = svc.Create("fake", "dry-run", "fake://doc", (dir, meta) =>
+        {
+            File.WriteAllText(Path.Combine(dir, "state.json"), "{}");
+            meta["snapshotReuseVersion"] = 1;
+            ApplyPreviewArtifact.StoreInMetadata(meta, opsHash, preview);
+        });
+
+        var found = svc.FindLatestReusableCandidate(
+            "fake", "fake://doc", opsHash,
+            (expected, current) => string.Equals(expected, current, StringComparison.Ordinal));
+        Assert.NotNull(found);
+        Assert.Equal(info.SnapshotId, found!.Value.Info.SnapshotId);
+
+        Assert.Null(svc.FindLatestReusableCandidate(
+            "fake", "fake://other", opsHash,
+            (expected, current) => string.Equals(expected, current, StringComparison.Ordinal)));
+        Assert.Null(svc.FindLatestReusableCandidate(
+            "fake", "fake://doc", "different-ops",
+            (expected, current) => string.Equals(expected, current, StringComparison.Ordinal)));
     }
 }

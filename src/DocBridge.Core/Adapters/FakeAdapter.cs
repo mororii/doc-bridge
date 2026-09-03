@@ -29,6 +29,7 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
     public string Selection { get; set; } = "Sheet1!A1:B3";
     public string DocumentRef { get; set; } = "fake-document";
     public int PreviewCallCount { get; private set; }
+    public int StatusCallCount { get; private set; }
 
     public JsonObject CaptureState()
     {
@@ -57,8 +58,11 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
         BodyText = Json.GetString(state, "bodyText") ?? "";
     }
 
-    public AdapterStatus GetStatus() =>
-        new(true, true, "fake", "1.0", DocumentRef, "in-memory adapter");
+    public AdapterStatus GetStatus()
+    {
+        StatusCallCount++;
+        return new(true, true, "fake", "1.0", DocumentRef, "in-memory adapter");
+    }
 
     public JsonObject GetCapabilities() => new()
     {

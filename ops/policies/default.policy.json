@@ -17,7 +17,7 @@
       "forbiddenOps": ["save_overwrite_without_backup", "run_external_macro"]
     },
     "cad": {
-      "writeOps": ["activate_document", "set_layer_visibility", "set_layer_color", "move_entities", "rotate_entities", "set_text_value", "copy_entities_between_documents", "insert_xref", "zoom_window", "draw_entities", "copy_entities", "scale_entities", "mirror_entities", "offset_entities", "set_entity_properties", "set_block_attributes", "configure_layout", "create_viewport", "draw_taegeukgi", "draw_union_jack", "draw_block_wall_schematic"],
+      "writeOps": ["activate_document", "regen_document", "set_layer_visibility", "set_layer_color", "move_entities", "rotate_entities", "set_text_value", "copy_entities_between_documents", "insert_xref", "zoom_window", "draw_entities", "copy_entities", "scale_entities", "mirror_entities", "offset_entities", "set_entity_properties", "set_block_attributes", "configure_layout", "create_viewport", "draw_taegeukgi", "draw_union_jack", "draw_block_wall_schematic"],
       "highRiskOps": ["delete_entities", "delete_entities_in_bounds", "delete_entities_from_index", "run_script_template", "save_document", "plot_pdf"],
       "forbiddenOps": ["run_arbitrary_script"]
     },
