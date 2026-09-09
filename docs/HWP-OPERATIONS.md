@@ -1,6 +1,10 @@
 # HWP 작업 명세
 
-DocBridge 0.4의 한글 작업은 화면 좌표나 스크립트 매크로를 사용하지 않는다. 한컴이 공개한 HWP Automation `HAction`, `HParameterSet`, `InsertPicture`, `SaveAs` API만 사용한다. 모든 쓰기 작업은 `dryRun`으로 스냅샷과 확인 토큰을 만든 뒤 적용하며, 작업 중 하나라도 실패하면 적용 직전 네이티브 HWP 스냅샷으로 자동 복원한다.
+DocBridge 0.4의 한글 작업은 화면 좌표나 스크립트 매크로를 사용하지 않는다. 한컴이 공개한 HWP Automation `HAction`, `HParameterSet`, `InsertPicture`, `SaveAs` API만 사용한다. 작업 중 하나라도 실패하면 적용 직전 네이티브 HWP 스냅샷으로 자동 복원한다.
+
+일반적인 사용자 편집 요청은 그 범위의 승인이다. 모든 쓰기마다 재승인 질문을 요구하지 않는다. `highRiskConfirm`은 권한 UI를 대체하거나 사람 승인을 증명하지 않는다.
+
+현재 `autoExecuteOps`는 `append_text`, `insert_before_text`, `insert_after_text`, `table_cell_set_text`, `table_set_cells`, `set_field_text`, `set_paragraph_format`, `set_paragraph_style_basic`, `format_paragraphs`다. 정확한 목록은 `ops/policies/default.policy.json`과 `core_get_capabilities({"app":"hwp"})`를 따른다. `insert_text`는 execute 대상이 아니다. execute는 UUID `requestId`와 반환된 `documentRef`/`instanceRef`(또는 절대 `file`)를 `expectedDocumentRef`로 쓰며 `dryRun`/`confirmToken`/`highRiskConfirm`을 포함하지 않는다. 미리보기·표 삭제·PDF·그 밖의 writeOps는 기존 dry-run → 같은 ops/`confirmToken`이다.
 
 ## 공통 호출
 
@@ -28,9 +32,9 @@ DOCX 우선 새 문서 예시:
 
 한글은 `FileOpen`의 `OOXML` 형식으로 DOCX를 가져온 뒤 `FileSaveAs`로 새 네이티브 파일을 저장한다. 응답은 원본·출력 SHA-256, 파일 크기, OOXML 열기/네이티브 저장 시간, 표 수, 쪽 수와 필수 문구 검증을 포함한다. 기대 쪽 수보다 정확히 1쪽 많고 마지막 문단이 비어 있으면 OOXML 가져오기가 만든 끝 문단만 최소 높이로 축소하며 결과를 `summary.compatibilityAdjustment`에 기록한다. `summary.verification.passed:false`이면 출력이 만들어졌어도 완료가 아니며, DOCX를 조정해 새 출력 이름으로 다시 변환한다.
 - `file`을 생략한 호출은 사용자가 연 창만 탐색하며 빈 한글을 자동 실행하지 않는다. 활성 문서가 없으면 문서를 연 뒤 다시 호출한다.
-- 먼저 `hwp_doctor`가 `CHECK_PASSED`인지 확인하고 `core_get_capabilities({"app":"hwp"})`, `hwp_get_active_context`를 호출한다. `automationWorkingDirectory`는 설치된 한글 `Bin`, `automationWindowsDirectory`는 실제 Windows 폴더여야 한다. `automationEnvironmentRepairNeeded:true`이면 AI 런처의 process-level `windir`/`SystemRoot`가 잘못됐지만 DocBridge가 worker 및 COM 자식 환경에 정상값을 주입한다. `updateRecommended:true`는 한글 패치 권고이지 자동 차단 조건이 아니다. `ownedAutomationBlocked:true`이면 실제 오류창 또는 복구 불가능한 Windows 환경이 있으므로 새 인스턴스를 만들지 않는다. 여러 단계 편집은 `hwp_read_text({"scope":"document_map"})`의 `lineId`와 coverage를 기준으로 삼는다. 본문·문단 지도·구조가 함께 필요하면 `scope:"bundle", sections:["text","document_map","structure"]`로 한 번에 읽는다. 필요한 경우에만 `fields`·`tables` section을 추가하고 기존 표 서식은 `includeStyles:true`로 읽는다.
+- 한 앱 작업은 `core_get_status({"app":"hwp"})`와 필요한 문서 ref·범위 읽기로 시작한다. ping·전체 앱 status·반복 context·전체 재조회를 강제하지 않는다. 첫 연결이나 오류가 있을 때 `hwp_doctor`가 `CHECK_PASSED`인지 확인하고, allowlist가 필요하면 `core_get_capabilities({"app":"hwp"})`를 본다. `automationWorkingDirectory`는 설치된 한글 `Bin`, `automationWindowsDirectory`는 실제 Windows 폴더여야 한다. `automationEnvironmentRepairNeeded:true`이면 AI 런처의 process-level `windir`/`SystemRoot`가 잘못됐지만 DocBridge가 worker 및 COM 자식 환경에 정상값을 주입한다. `updateRecommended:true`는 한글 패치 권고이지 자동 차단 조건이 아니다. `ownedAutomationBlocked:true`이면 실제 오류창 또는 복구 불가능한 Windows 환경이 있으므로 새 인스턴스를 만들지 않는다. 여러 단계 편집은 `hwp_read_text({"scope":"document_map"})`의 `lineId`와 coverage를 기준으로 삼는다. 본문·문단 지도·구조가 함께 필요하면 `scope:"bundle", sections:["text","document_map","structure"]`로 한 번에 읽는다. 필요한 경우에만 `fields`·`tables` section을 추가하고 기존 표 서식은 `includeStyles:true`로 읽는다.
 - 적용 뒤에는 `readback.postEditReread`와 `readback.session`을 확인한다. 실패 전 위치나 occurrence를 재사용하지 않고 갱신된 문단 지도로 다음 배치를 만든다.
-- 적용은 같은 `ops`로 1) `dryRun:true`, 2) 반환된 `confirmToken`을 넣어 `dryRun:false` 순서로 수행한다.
+- allowlist 일반 편집은 `executionMode=execute`로 한 번에 적용하고 응답 `readback`을 확인한다. 미리보기·고위험은 같은 `ops`로 1) `dryRun:true`, 2) 반환된 `confirmToken`을 넣어 `dryRun:false` 순서로 수행한다. `requestId`는 호출마다 새 UUID이고, `outcomeUnknown`이면 새 UUID로 재실행하지 말고 문서를 먼저 확인한다.
 - 10개를 넘는 op, 큰 표/그림/PDF 같은 긴 작업은 같은 payload를 `hwp_submit_ops`로 제출하고 반환된 `jobId`를 `hwp_get_job`으로 조회한다. 클라이언트가 기다리다 timeout되어도 같은 배치를 다시 제출하지 않는다. `succeeded`의 `result`가 원래 `hwp_apply_ops` 결과다.
 - `dryRun`은 같은 배치의 앞 op가 만든 본문·anchor·표·행·열 상태를 뒤 op가 이어받아 순차 시뮬레이션한다. 미리보기에서 후속 op가 앞 op 결과를 찾지 못하면 적용하지 말고 결함으로 취급한다.
 - 적용 결과의 `timings.previewReused`와 단계별 ms를 확인한다. HWP fingerprint가 dry-run 뒤 달라졌다는 오류는 재시도하지 말고 문서를 다시 읽은 뒤 새 dry-run을 만든다.
@@ -98,6 +102,13 @@ DOCX 우선 새 문서 예시:
 ### `export_pdf`
 
 `output`에 절대 `.pdf` 경로를 지정한다. 기존 파일이 있으면 교체될 수 있어 `highRiskConfirm:true`가 필요하다. 출력 파일 존재와 크기를 적용 후 확인한다.
+
+## 확인된 실측 (0.4.20 현재 소스)
+
+숫자와 단일 표본 제한의 원문은 [PERFORMANCE.md](PERFORMANCE.md)다. 과거 게이트와 합산하지 않는다.
+
+- 일반 execute/UUID 재전송 1건 31.269초. 중복 삽입 1회와 대상 `documentRef`를 확인했다. 한글 프로세스 전체 종료 시험은 아니다.
+- 제작 format/table/page/picture/PDF 1건 10.833초. PDF 1쪽 596×840pt. 렌더에서 한글, 파랑/빨강 글자서식, 표, 검은 시험 그림, 바닥글/쪽번호를 확인했다. 시험 이미지가 본문 중간에 있어 줄이 나뉘며 완성 문서 디자인 검수로 주장하지 않는다.
 
 ## 검증 기준
 

@@ -20,6 +20,7 @@ public class McpHandshakeTests : IDisposable
         _host.Router.Register("excel", new FakeAdapter());
         _host.Router.Register("hwp", new FakeAdapter());
         _host.Router.Register("cad", new FakeAdapter());
+        _host.Router.Register("gstarcad", new FakeAdapter());
         _dispatcher = new JsonRpcDispatcher(new ToolRegistry(_host), DocBridgeHost.Version);
     }
 
@@ -50,11 +51,11 @@ public class McpHandshakeTests : IDisposable
     }
 
     [Fact]
-    public void Tools_list_exposes_all_25_underscore_tools()
+    public void Tools_list_exposes_all_29_underscore_tools()
     {
         var res = _dispatcher.Dispatch(Req("tools/list", 2));
         var tools = Json.GetArr(ResultOf(res), "tools")!;
-        Assert.Equal(25, tools.Count);
+        Assert.Equal(29, tools.Count);
 
         var names = tools.Select(t => Json.GetString(t as JsonObject, "name")!).ToHashSet();
         foreach (var want in new[]
@@ -63,6 +64,7 @@ public class McpHandshakeTests : IDisposable
             "excel_get_active_context", "excel_read_range", "excel_inspect", "excel_apply_ops", "excel_disconnect",
             "hwp_plan_creation", "hwp_launch", "hwp_get_active_context", "hwp_doctor", "hwp_repair_typelib", "hwp_read_text", "hwp_apply_ops", "hwp_submit_ops", "hwp_get_job",
             "cad_launch", "cad_get_active_context", "cad_query_entities", "cad_apply_ops",
+            "gstarcad_launch", "gstarcad_get_active_context", "gstarcad_query_entities", "gstarcad_apply_ops",
         })
             Assert.Contains(want, names);
 
@@ -93,7 +95,14 @@ public class McpHandshakeTests : IDisposable
         Assert.False(Json.GetBool(Json.GetObj(disconnectTool, "annotations"), "destructiveHint"));
         Assert.True(Json.GetBool(Json.GetObj(disconnectTool, "annotations"), "idempotentHint"));
         var excelWriteSchema = Json.GetObj(writeTool, "inputSchema")!;
+        var excelWriteProps = Json.GetObj(excelWriteSchema, "properties")!;
+        Assert.NotNull(Json.GetObj(excelWriteProps, "executionMode"));
+        Assert.NotNull(Json.GetObj(excelWriteProps, "requestId"));
+        Assert.NotNull(Json.GetObj(excelWriteProps, "expectedDocumentRef"));
         Assert.Contains("활성 시트", Json.GetString(excelWriteSchema, "description"));
+
+        var statusTool = tools.Select(t => t as JsonObject).First(t => Json.GetString(t, "name") == "core_get_status")!;
+        Assert.NotNull(Json.GetObj(Json.GetObj(Json.GetObj(statusTool, "inputSchema"), "properties"), "app"));
         var excelWriteItems = Json.GetObj(Json.GetObj(Json.GetObj(excelWriteSchema, "properties"), "ops"), "items")!;
         var excelWriteProperties = Json.GetObj(excelWriteItems, "properties")!;
         Assert.NotNull(Json.GetObj(excelWriteProperties, "target"));
@@ -108,10 +117,17 @@ public class McpHandshakeTests : IDisposable
         }.All(excelOps.Contains));
         Assert.NotNull(Json.GetObj(excelWriteProperties, "hidden"));
         Assert.NotNull(Json.GetObj(excelWriteProperties, "visibility"));
+        var excelStyle = Json.GetObj(excelWriteProperties, "style")!;
+        Assert.False(excelStyle["additionalProperties"]!.GetValue<bool>());
+        Assert.NotNull(Json.GetObj(Json.GetObj(excelStyle, "properties"), "bold"));
+        Assert.Contains("bold", Json.GetString(excelStyle, "description"), StringComparison.OrdinalIgnoreCase);
 
         var excelReadProperties = Json.GetObj(Json.GetObj(readTool, "inputSchema"), "properties")!;
         Assert.NotNull(Json.GetObj(excelReadProperties, "includeLayout"));
         Assert.NotNull(Json.GetObj(excelReadProperties, "allowOpenFile"));
+        var includeStyles = Json.GetString(Json.GetObj(excelReadProperties, "includeStyles"), "description");
+        Assert.Contains("fontBold", includeStyles, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("fillPattern", includeStyles, StringComparison.OrdinalIgnoreCase);
 
         var cadQueryTool = tools.Select(t => t as JsonObject).First(t => Json.GetString(t, "name") == "cad_query_entities")!;
         var cadScopeEnum = Json.GetArr(Json.GetObj(Json.GetObj(Json.GetObj(cadQueryTool, "inputSchema"), "properties"), "scope"), "enum")!;
@@ -232,6 +248,21 @@ public class McpHandshakeTests : IDisposable
         var hwpRepair = tools.Select(t => t as JsonObject).First(t => Json.GetString(t, "name") == "hwp_repair_typelib")!;
         Assert.False(Json.GetBool(Json.GetObj(hwpRepair, "annotations"), "readOnlyHint"));
         Assert.True(Json.GetBool(Json.GetObj(hwpRepair, "annotations"), "destructiveHint"));
+    }
+
+    [Fact]
+    public void Tools_call_core_get_status_can_filter_one_app()
+    {
+        var filtered = _dispatcher.Dispatch(Req("tools/call", 31, new JsonObject
+        {
+            ["name"] = "core_get_status",
+            ["arguments"] = new JsonObject { ["app"] = "excel" },
+        }));
+        var payload = JsonNode.Parse(Json.GetString(Json.GetArr(ResultOf(filtered), "content")![0] as JsonObject, "text")!) as JsonObject;
+        Assert.True(Json.GetBool(payload, "ok"));
+        var apps = Json.GetObj(payload, "apps")!;
+        Assert.NotNull(Json.GetObj(apps, "excel"));
+        Assert.Null(apps["hwp"]);
     }
 
     [Fact]
@@ -397,6 +428,11 @@ public class McpHandshakeTests : IDisposable
         Assert.False(string.IsNullOrWhiteSpace(instructions));
         Assert.Contains("dryRun", instructions);      // 안전 흐름을 에이전트가 알 수 있어야 한다
         Assert.Contains("confirmToken", instructions);
+        Assert.Contains("executionMode", instructions);
+        Assert.Contains("requestId", instructions);
+        Assert.Contains("expectedDocumentRef", instructions);
+        Assert.Contains("Book1", instructions);
+        Assert.Contains("autoExecuteOps", instructions);
         Assert.Contains("target.sheet", instructions);
         Assert.Contains("core_get_status", instructions);
         Assert.Contains("allowOpenFile", instructions);

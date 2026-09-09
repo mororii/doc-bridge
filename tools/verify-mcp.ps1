@@ -222,7 +222,8 @@ $expectedToolNames = @(
     'core_ping','core_get_status','core_get_capabilities','core_disconnect','core_create_snapshot','core_list_snapshots','core_restore_snapshot',
     'excel_get_active_context','excel_read_range','excel_inspect','excel_apply_ops','excel_disconnect',
     'hwp_plan_creation','hwp_launch','hwp_get_active_context','hwp_doctor','hwp_repair_typelib','hwp_read_text','hwp_apply_ops','hwp_submit_ops','hwp_get_job',
-    'cad_launch','cad_get_active_context','cad_query_entities','cad_apply_ops'
+    'cad_launch','cad_get_active_context','cad_query_entities','cad_apply_ops',
+    'gstarcad_launch','gstarcad_get_active_context','gstarcad_query_entities','gstarcad_apply_ops'
 )
 $missingTools = @($expectedToolNames | Where-Object { $toolNames -notcontains $_ })
 $extraTools = @($toolNames | Where-Object { $expectedToolNames -notcontains $_ })
@@ -230,7 +231,8 @@ Check 'tools/list 정확한 공개 도구 집합' (($missingTools.Count -eq 0) -
     "actual=$($toolNames.Count), missing=$($missingTools -join ','), extra=$($extraTools -join ',')"
 foreach ($want in @('core_ping','core_disconnect','excel_get_active_context','excel_inspect','excel_apply_ops','excel_disconnect',
                     'hwp_plan_creation','hwp_launch','hwp_get_active_context','hwp_doctor','hwp_repair_typelib','hwp_apply_ops','hwp_submit_ops','hwp_get_job',
-                    'cad_launch','cad_get_active_context','cad_apply_ops')) {
+                    'cad_launch','cad_get_active_context','cad_apply_ops',
+                    'gstarcad_launch','gstarcad_get_active_context','gstarcad_query_entities','gstarcad_apply_ops')) {
     Check "tool 존재: $want" ($toolNames -contains $want)
 }
 Check 'tool 이름에 점(.) 없음' (-not ($toolNames | Where-Object { $_ -like '*.*' }))
@@ -240,10 +242,11 @@ Check 'core_ping isError=false' ($ping.result.isError -eq $false)
 $payload = $null
 if ($ping.result.content) { $payload = $ping.result.content[0].text | ConvertFrom-Json }
 Check 'core_ping ok=true' ($payload.ok -eq $true)
-Check 'core_ping 어댑터 excel/hwp/cad 등록' (
+Check 'core_ping 어댑터 excel/hwp/cad/gstarcad 등록' (
     ($payload.adapters -contains 'excel') -and
     ($payload.adapters -contains 'hwp') -and
-    ($payload.adapters -contains 'cad')) ($payload.adapters -join ',')
+    ($payload.adapters -contains 'cad') -and
+    ($payload.adapters -contains 'gstarcad')) ($payload.adapters -join ',')
 Check 'structuredContent 동봉' ($null -ne $ping.result.structuredContent)
 
 $excelPayload1 = Get-ToolPayload $excelContext1

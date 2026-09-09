@@ -19,7 +19,7 @@ description: 한컴 한글 HWP/HWPX에서 계획서·보고서·표·조직도·
 ## 시작과 대상 고정
 
 1. 첫 한글 작업에서 `hwp_doctor`를 호출한다. `state:"CHECK_PASSED"`일 때 계속하며 `automationWorkingDirectory`가 설치된 한글의 `Bin`, `automationWindowsDirectory`가 실제 Windows 폴더인지 확인한다. `automationEnvironmentRepairNeeded:true`는 AI 런처가 `windir`/`SystemRoot`를 누락·오염시켰지만 DocBridge가 worker와 COM 자식 환경에서 복구한다는 뜻이므로 오류가 아니다. TypeLib 누락·버전 불일치는 편집을 시작하지 말고 원인을 알린다. `hwp_repair_typelib`은 사용자가 레지스트리 재등록과 UAC를 명시 승인한 경우에만 `confirm:true`로 실행하고 한글과 AI 클라이언트를 완전히 재시작한다. `PopupBorderImpl`/`TourPopup`/`MS.Internal.FontCache.Util`/`CultureFontManager`, `HWP_UI_INITIALIZATION_FAILED`가 실제로 보이면 같은 실행을 반복하지 않는다. 오류 창에서 `아니요(N)`를 눌러 문서를 유지한다. `ownedAutomationBlocked:true`이면 먼저 오류창을 닫거나 Windows 자동화 환경을 복구하고, 환경이 정상인데도 재현될 때 한컴 자동 업데이트를 실행한다.
-2. 기존 문서 편집은 `core_get_capabilities({"app":"hwp"})`, `hwp_get_active_context`를 호출한다. `summary.openDocuments`의 모든 표시 창과 탭을 확인하고, 요청한 파일명·경로·내용과 일치하는 한 항목을 선택한다. 새 문서 작성은 먼저 `hwp_plan_creation`을 호출한다. `mode:"docx-first"`이면 DOCX를 먼저 만들고 `hwp_launch`로 가져오며, `mode:"native-hwp"`일 때만 `hwp_launch({"creationMode":"native-hwp","newDocument":true})`를 작업 시작에 정확히 한 번 호출해 반환된 `documentRef`를 고정한다.
+2. 기존 문서 편집은 `core_get_status({"app":"hwp"})`로 시작하고, 필요한 창 목록만 `hwp_get_active_context`로 읽는다. ping·전체 앱 status를 반복하지 않는다. allowlist가 필요할 때만 `core_get_capabilities({"app":"hwp"})`를 본다. `summary.openDocuments`의 모든 표시 창과 탭을 확인하고, 요청한 파일명·경로·내용과 일치하는 한 항목을 선택한다. 새 문서 작성은 먼저 `hwp_plan_creation`을 호출한다. `mode:"docx-first"`이면 DOCX를 먼저 만들고 `hwp_launch`로 가져오며, `mode:"native-hwp"`일 때만 `hwp_launch({"creationMode":"native-hwp","newDocument":true})`를 작업 시작에 정확히 한 번 호출해 반환된 `documentRef`를 고정한다.
 3. 열린 문서가 하나뿐이어도 가능하면 `hwp_read_text`와 모든 쓰기 op에 선택한 `documentRef`를 넣는다. 문서가 둘 이상이면 반드시 넣는다. 한 배치의 모든 op는 같은 `documentRef`를 사용해야 하고 `file`과 함께 쓰지 않는다. 저장 문서는 경로가 `documentRef`이며, 저장 전 문서는 `untitled-<PID>-<문서ID>`다. 한글 경로가 셸에서 깨지거나 동일 파일이 중복 열린 경우에는 `instanceRef`(`hwp:<PID>:<문서ID>`)를 `documentRef` 값으로 사용한다.
 4. 명시적인 디스크 파일 작업만 모든 op에 같은 절대 `file`을 넣는다. 경로를 지정하면 DocBridge는 모든 표시 한글 창과 탭을 조사하고 해당 문서를 활성화한다. `HWP_DUPLICATE_LOCAL_PATH`가 나오면 `openDocuments`의 고유 `instanceRef`를 사용하거나 중복 창을 닫으며 임의 선택하지 않는다. 실시간 호출은 빈 한글 창을 자동 실행하지 않는다. 열린 문서가 없으면 사용자가 문서를 열도록 안내하고 중단한다.
 5. 편집 전 `hwp_read_text`로 문서를 읽는다. 본문·문단 지도·구조가 함께 필요하면 `scope:"bundle", sections:["text","document_map","structure"]` 한 번을 우선 사용한다. 표·필드가 실제로 필요할 때만 `tables`·`fields` section을 추가하고 기존 표 서식은 `includeStyles:true`로 읽는다. 긴 문서는 `coverage.complete` 또는 후속 `nextStartParagraph`를 확인한다.
@@ -46,15 +46,15 @@ description: 한컴 한글 HWP/HWPX에서 계획서·보고서·표·조직도·
 
 ## 안전한 실행 순서
 
-1. 한 번의 배치에는 같은 목적의 op만 넣는다.
-2. 동일한 `ops`로 `hwp_apply_ops(dryRun:true)`를 실행한다.
-3. 오류, 경고, 대상, diff를 검사한다. 저위험 작업은 사용자의 원 요청이 승인이다.
+1. 한 번의 배치에는 같은 목적의 op만 넣는다. 일반적인 사용자 편집 요청은 그 범위의 승인이다. 모든 쓰기마다 재승인 질문을 하지 않는다.
+2. `append_text`, `insert_before_text`, `insert_after_text`, `table_cell_set_text`, `table_set_cells`, `set_field_text`, `set_paragraph_format`, `set_paragraph_style_basic`, `format_paragraphs`는 `executionMode=execute`와 새 UUID `requestId`, 반환된 `documentRef`/`instanceRef`로 한 번에 적용한다. `insert_text`는 execute가 아니다. `dryRun`/`confirmToken`/`highRiskConfirm`을 execute와 함께 쓰지 않는다. `outcomeUnknown`이면 새 UUID로 재실행하지 말고 문서를 먼저 확인한다.
+3. 미리보기·표 삭제·PDF·그 밖의 writeOps는 동일한 `ops`로 `hwp_apply_ops(dryRun:true)`를 실행한다. 오류, 경고, 대상, diff를 검사한다.
    - 같은 배치의 뒤 op는 앞 op가 만든 본문·anchor·표 구조를 dry-run에서 이어받아야 한다. 0 occurrence나 표 없음이 나오면 그대로 apply하지 않는다.
-4. 반환된 `confirmToken`과 정확히 같은 `ops`로 `dryRun:false`를 실행한다.
-5. `ok`뿐 아니라 `readback.verified`, `mismatches`, `operationResults`, `readback.session`, `timings`를 확인한다. 한 단계가 실패하면 뒤 단계가 실행되지 않았는지 `failedStep`과 `stoppedEarly`로 확인한다. fingerprint 변경 오류는 오래된 토큰으로 반복하지 말고 갱신된 문서를 다시 읽어 새 dry-run을 만든다.
-6. 다음 배치는 `readback.postEditReread`의 갱신된 본문·문단 지도·문서 ID를 기준으로 다시 계획한다. 실패 이전의 anchor 순번이나 위치를 그대로 재사용하지 않는다.
-7. 표 행/열 삭제와 `export_pdf`에는 명시적 승인 후 `highRiskConfirm:true`를 넣는다.
-8. 실패 시 자동 롤백 결과를 확인한다. 수동 복원은 `core_restore_snapshot`의 두 단계 흐름만 사용한다. `HWP_COM_TIMEOUT` 또는 `HWP_CIRCUIT_OPEN`이면 즉시 자동 재시도하지 않고 `retryPolicy.mode:"after-delay"`와 `retryAfterMs`를 지킨다. 이 보호 시간에는 새 worker나 빈 한글 창을 반복 실행하지 않는다. 팝업을 닫고 지연 뒤 문서를 다시 읽어 새 dry-run을 만든다. `HWP_UI_INITIALIZATION_FAILED`이면 자동·수동 재시도를 모두 중단하고 오류창과 `hwp_doctor`를 확인한다. `HWP_AUTOMATION_ENVIRONMENT_INVALID`이면 `windir`/`SystemRoot` 및 Windows 설치 폴더를 복구하기 전에는 새 인스턴스를 만들지 않는다.
+4. 토큰 경로는 반환된 `confirmToken`과 정확히 같은 `ops`로 `dryRun:false`를 실행한다.
+5. `ok`뿐 아니라 응답 `readback.verified`, `mismatches`, `operationResults`, `readback.session`, `timings`를 확인한다. 한 단계가 실패하면 뒤 단계가 실행되지 않았는지 `failedStep`과 `stoppedEarly`로 확인한다. fingerprint 변경 오류는 오래된 토큰으로 반복하지 말고 갱신된 문서를 다시 읽어 새 dry-run을 만든다.
+6. 다음 배치는 `readback.postEditReread`가 있으면 그 본문·문단 지도·문서 ID를 기준으로 다시 계획한다. 실패 이전의 anchor 순번이나 위치를 그대로 재사용하지 않는다.
+7. 표 행/열 삭제와 `export_pdf`는 토큰 경로에서 명시적 승인 후 `highRiskConfirm:true`를 넣는다. `highRiskConfirm`은 권한 UI를 대체하거나 사람 승인을 증명하지 않는다. 이미 요청한 PDF에 새 질문을 무조건 요구하지 않는다.
+8. 실패 시 자동 롤백 결과를 확인한다. 수동 복원은 `core_restore_snapshot`의 두 단계 흐름만 사용한다. `HWP_COM_TIMEOUT` 또는 `HWP_CIRCUIT_OPEN`이면 즉시 자동 재시도하지 않고 `retryPolicy.mode:"after-delay"`와 `retryAfterMs`를 지킨다. 이 보호 시간에는 새 worker나 빈 한글 창을 반복 실행하지 않는다. 팝업을 닫고 지연 뒤 문서를 다시 읽어 새 execute 또는 dry-run을 만든다. `HWP_UI_INITIALIZATION_FAILED`이면 자동·수동 재시도를 모두 중단하고 오류창과 `hwp_doctor`를 확인한다. `HWP_AUTOMATION_ENVIRONMENT_INVALID`이면 `windir`/`SystemRoot` 및 Windows 설치 폴더를 복구하기 전에는 새 인스턴스를 만들지 않는다.
 
 ## 실무 서식 원칙
 

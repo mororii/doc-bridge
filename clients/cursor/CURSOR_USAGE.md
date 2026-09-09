@@ -13,7 +13,8 @@
 첫 점검 요청:
 
 ```text
-doc-bridge로 core_ping과 core_get_status를 실행하고 Excel, 한글, AutoCAD 연결 상태만 보여줘. 아직 수정하지 마.
+doc-bridge로 core_get_status를 실행하고 연결된 문서만 보여줘. 아직 수정하지 마.
+한 앱만 다룰 때는 app 필터를 쓰고 ping·전체 앱 조회를 반복하지 마.
 ```
 
 ## 빈 Excel 창 방지
@@ -24,7 +25,7 @@ Excel은 `core_get_status` 응답의 `apps.excel.connected`와 `apps.excel.docum
 - 연결이 없거나 `document`가 비어 있으면 `excel_get_active_context`를 실행 확인용으로 호출하지 않습니다. 같은 실패를 반복 재시도하지 말고, 사용자가 통합문서를 연 뒤 새 `core_get_status`에서 문서가 보일 때만 다시 시도합니다.
 - `allowOpenFile`의 기본값은 `false`입니다. 사용자가 닫힌 파일 읽기를 명시적으로 요청하고 기존 파일의 absolute workbook path를 제공한 경우에만 지원되는 읽기 도구에 `workbook`과 `allowOpenFile:true`를 함께 전달합니다. 일반 Excel 요청에서 이를 추론하거나 쓰기에 사용하거나 경로를 추측하지 않습니다. 쓰기 도구가 열린 workbook을 요구하면 빈 Excel을 띄우지 말고 먼저 해당 파일을 Excel에서 열어야 한다고 안내합니다.
 - DocBridge Excel 호출이 실패하거나 기능 제약을 반환하면 original DocBridge error를 그대로 보여 주고 중단합니다. `openpyxl`, `pywin32` 또는 `DispatchEx("Excel.Application")`, PowerShell Excel COM, `Start-Process`, shell/UI automation으로 우회하거나 원본 workbook을 디스크에서 반복 overwrite하지 않습니다. 실제 상태 변화가 있거나 사용자가 지원되는 DocBridge 경로를 명시적으로 선택한 경우에만 다시 진행합니다.
-- 경로 기반 작업 뒤 또는 `detail`이 `DocBridge가 생성한 인스턴스`이면 저장되지 않은 변경이 없음을 확인하고 `excel_disconnect`를 호출합니다. `detail`이 `사용자가 열어 둔 엑셀 창에 연결됨`인 경우 Excel을 종료하지 않습니다.
+- 경로 기반 작업 뒤 또는 `detail`이 `DocBridge가 생성한 인스턴스`이면 저장되지 않은 변경이 없음을 확인하고 `excel_disconnect`를 호출합니다. DocBridge가 만든 저장된 통합문서는 정상 disconnect/파이프 종료에서 회수됩니다. 호스트 크래시 뒤 잔류 `EXCEL.EXE`는 관측된 한계이며, 유령 프로세스가 해결되었다고 보지 마십시오. `detail`이 `사용자가 열어 둔 엑셀 창에 연결됨`인 경우 Excel을 종료하지 않으며 사용자 Excel은 강제 종료하지 않습니다.
 
 Cursor에는 다음처럼 요청할 수 있습니다.
 
@@ -63,13 +64,15 @@ Cursor 사용자 규칙은 `Cursor Settings > Rules`에서 관리하는 일반 �
 %LOCALAPPDATA%\DocBridge\generated-configs\cursor
 ```
 
-## 반드시 지킬 쓰기 절차
+## 쓰기 절차
 
-1. 정확한 문서와 위치를 읽습니다.
-2. `*_apply_ops`를 `dryRun=true`로 호출합니다.
-3. diff와 영향 범위, confirmToken을 사용자에게 보여 주고 승인을 기다립니다.
-4. 같은 ops와 confirmToken으로 `dryRun=false`를 실행합니다.
-5. 변경 위치를 다시 읽어 검증합니다.
+일반적인 사용자 편집 요청은 그 범위의 승인입니다. 클라이언트 권한 UI, 서버 사전 검사, 사람의 범위 승인을 구분합니다. 모든 쓰기마다 재승인 질문을 하지 않습니다. 이미 요청한 저장·PDF도 새 질문을 무조건 요구하지 않습니다. `highRiskConfirm`은 권한 UI를 대체하거나 사람 승인을 증명하지 않습니다.
+
+1. 해당 앱만 `core_get_status({"app":...})`로 확인하고 필요한 범위와 `documentRef`를 읽습니다. ping·전체 앱 status·반복 context·전체 재조회를 강제하지 않습니다.
+2. Excel `set_values`/`set_formulas`/`format_range`, 한글 allowlist(`insert_text` 제외), CAD/GstarCAD `set_text_value`/`set_layer_visibility`/`set_layer_color`/`regen_document`는 `executionMode=execute`, 새 UUID `requestId`, 저장된 절대 경로로 한 번에 적용합니다. Excel/CAD는 인스턴스 바인딩 참조를 쓰지 않습니다. `dryRun`/`confirmToken`/`highRiskConfirm`을 false로라도 넣지 않습니다.
+3. `Book1`/`Drawing1`은 저장해 경로를 만들지 말고 dry-run 토큰 경로를 씁니다. CAD dirty 광범위 작업이나 저장 지문 불일치는 거절이며 자동 저장으로 우회하지 않습니다. 한글은 반환된 `documentRef`/`instanceRef`를 그대로 사용합니다.
+4. 미리보기·고위험·병합/숨김/도형/삭제/저장은 `dryRun=true` 후 같은 ops와 confirmToken으로 적용합니다. 원 요청이 이미 그 범위면 재승인 질문을 하지 않습니다.
+5. 응답 `readback`을 확인합니다. 필요한 육안 확인만 추가합니다. `outcomeUnknown`이면 새 UUID로 재실행하지 말고 문서를 먼저 확인합니다.
 
 confirmToken은 5분 동안 한 번만 유효하고 정확한 대상과 ops에 묶입니다. 토큰 발급 뒤 ops를 바꾸거나 사용자가 같은 문서를 수정했으면 다시 읽고 새 dry-run을 만듭니다. Cursor와 Codex·Claude·Kimi가 동시에 연결되어 있어도 같은 문서를 동시에 편집하면 안 됩니다.
 
@@ -77,7 +80,7 @@ confirmToken은 5분 동안 한 번만 유효하고 정확한 대상과 ops에 �
 
 - Excel: 쓰기 op마다 `target.sheet` 또는 `'시트명'!A1`을 명시합니다. 활성 시트를 추측하지 않습니다. 병합·행/열 숨김 전에는 `excel_read_range(includeLayout=true)`로 현재 `mergedAreas`, `rowStates`, `columnStates`, `sheetVisibility`를 읽습니다.
 - 한글: `hwp_get_active_context.summary.openDocuments`에서 대상의 `documentRef`/`instanceRef`를 선택합니다. `file`과 `documentRef`를 동시에 사용하지 않습니다.
-- AutoCAD: `interaction.interrupted` 또는 `userActivityDetected`가 true이면 도면을 다시 읽고 남은 작업만 새 dry-run으로 만듭니다.
+- AutoCAD/GstarCAD: execute는 문자·레이어·regen만입니다. 도형·저장·삭제는 토큰 경로입니다. dirty 광범위 작업이나 저장 지문이 맞지 않으면 거절하며 자동 저장으로 우회하지 않습니다. 문자 핸들·레이어 스냅샷은 그 범위만 복구하며 전체 도면 복구가 아닙니다. `interaction.interrupted` 또는 `userActivityDetected`가 true이면 도면을 다시 읽고 남은 작업만 새 execute 또는 dry-run으로 만듭니다.
 
 ## Excel 병합·숨김 요청
 
@@ -96,7 +99,7 @@ Excel의 정확한 documentRef와 시트 이름을 먼저 확인해줘.
 - `set_sheet_visibility`: `visibility:"hidden"|"visible"`만 사용합니다. 활성 시트, 마지막 표시 시트, `veryHidden` 신규 설정은 차단됩니다.
 
 visibility op끼리는 같은 batch에 묶을 수 있지만 값·수식·서식·복사·병합 op와 섞지 않습니다.
-적용 후 같은 범위를 `includeLayout=true`로 다시 읽고 `readback.verified`와 함께 검증합니다.
+적용 후 같은 범위를 `includeLayout=true`로 다시 읽고 `readback.verified`와 `rollback.verified`를 함께 확인합니다. 보호된 시트에서 Bold COM이 거절되면 롤백도 쓰지 못합니다.
 세부 payload와 제한은 [Excel 기본 편집 operations](../../docs/EXCEL-OPERATIONS.md)를 참고하십시오.
 
 ## 대형 CAD 후속조회

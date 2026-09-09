@@ -11,10 +11,14 @@ public class ExcelReconnectTests
     [Fact]
     public void Worker_discovery_timeout_precedes_common_client_deadline()
     {
+        Assert.Equal(TimeSpan.FromSeconds(45), ExcelWorkerAdapter.TimeoutForMethod("status"));
+        Assert.Equal(TimeSpan.FromSeconds(45), ExcelWorkerAdapter.TimeoutForMethod("context"));
+        Assert.Equal(TimeSpan.FromSeconds(45), ExcelWorkerAdapter.TimeoutForMethod("read"));
         Assert.True(ExcelWorkerAdapter.TimeoutForMethod("status") < TimeSpan.FromSeconds(60));
-        Assert.True(ExcelWorkerAdapter.TimeoutForMethod("context") < TimeSpan.FromSeconds(60));
-        Assert.True(ExcelWorkerAdapter.TimeoutForMethod("read") < TimeSpan.FromSeconds(60));
+        Assert.Equal(TimeSpan.FromSeconds(150), ExcelWorkerAdapter.TimeoutForMethod("validatePreviewReuse"));
         Assert.Equal(TimeSpan.FromSeconds(150), ExcelWorkerAdapter.TimeoutForMethod("apply"));
+        Assert.Equal(ExcelWorkerAdapter.TimeoutForMethod("apply"), ExcelWorkerAdapter.TimeoutForMethod("validatePreviewReuse"));
+        Assert.Contains(typeof(IPreviewReuseAdapter), typeof(ExcelWorkerAdapter).GetInterfaces());
     }
 
     [Fact]

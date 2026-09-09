@@ -74,6 +74,10 @@ public sealed partial class ExcelAdapter
     private static bool IsMergeOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
         ops is { Count: 1 } && MergeOperationNames.Contains(Json.GetString(ops[0], "op") ?? "");
 
+    private static bool IsFormatOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
+        ops is { Count: > 0 } &&
+        ops.All(op => string.Equals(Json.GetString(op, "op"), "format_range", StringComparison.OrdinalIgnoreCase));
+
     private static int ParseColumnNumber(JsonNode? node)
     {
         if (node is JsonValue value && value.TryGetValue<int>(out var number))

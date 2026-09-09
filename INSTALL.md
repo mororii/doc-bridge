@@ -16,7 +16,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\package-release.
 `tools\Clear-DocBridgeReleaseCache.ps1`을 먼저 미리보기로 실행한 뒤 `-Apply`로 정리할 수 있으며,
 ZIP과 SHA-256 파일은 이 정리 대상에 포함되지 않습니다.
 
-생성 결과는 `releases\DocBridge-0.4.19-win-x64.zip`입니다. ZIP에는 .NET 8 `win-x64` 런타임, 한글 COM 격리 worker, Codex 플러그인/로컬 marketplace, Claude/Kimi/Cursor MCP 설정 병합기, 한글 보안 모듈 등록기, 진단기와 제거기가 모두 들어갑니다.
+생성 결과는 `releases\DocBridge-0.4.20-win-x64.zip`입니다. ZIP에는 .NET 8 `win-x64` 런타임, 한글 COM 격리 worker, Codex 플러그인/로컬 marketplace, Claude/Kimi/Cursor MCP 설정 병합기, 한글 보안 모듈 등록기, 진단기와 제거기가 모두 들어갑니다.
 
 새 PC에서 ZIP을 압축 해제하고 AI 클라이언트와 Office/CAD 프로그램을 종료한 뒤 실행합니다.
 
@@ -55,7 +55,9 @@ cd C:\Tools\DocBridge
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-mcp.ps1
 ```
 
-예상 버전은 `0.4.19`이며 검증 끝에 `모두 통과`가 나와야 합니다. 배포 무결성 검사에는 `doc-bridge-hwp-worker.exe`도 포함됩니다.
+예상 버전은 `0.4.20`이며 검증 끝에 `모두 통과`가 나와야 합니다. 배포 무결성 검사에는 `doc-bridge-hwp-worker.exe`도 포함됩니다.
+
+0.4.20부터 GstarCAD는 별도 `gstarcad_*` 도구 4개로 연결합니다. AutoCAD의 `cad_*`와 혼용하지 않습니다. 설치 후 AI를 완전히 재시작하고 새 작업에서 “GstarCAD 전용 도구로 열린 도면을 확인해 줘”라고 요청하세요. 기본 편집과 미지원 기능의 차이는 [GstarCAD 안내](docs/GSTARCAD.md)를 참고하세요. 이전 AI 세션의 도구 목록은 설치만으로 갱신되지 않습니다.
 
 GitHub 기본 CI는 Office가 없어도 재현되는 테스트만 실행하고, Excel·한글·AutoCAD 실제 COM 검증은 전용 Windows self-hosted workflow에서 수동 실행합니다. 준비와 안전 규칙은 [실제 앱 E2E 운영 안내](docs/REAL-APP-E2E.md)를 참고하세요.
 
@@ -97,10 +99,10 @@ kimi --mcp-config-file "$env:LOCALAPPDATA\DocBridge\generated-configs\kimi-mcp.j
 
 이 전역 파일은 모든 Cursor 프로젝트에서 사용됩니다. 반면 `<프로젝트>\.cursor\mcp.json`은 해당 프로젝트 전용 설정이므로 설치기가 만들거나 변경하지 않습니다. 특별한 이유가 없다면 같은 이름의 서버를 전역과 프로젝트 양쪽에 중복 등록하지 마십시오. 수동 설정이 필요하면 설치 후 `%LOCALAPPDATA%\DocBridge\generated-configs\cursor-mcp.json`의 `doc-bridge` 항목만 기존 JSON에 병합합니다.
 
-설치 후 Cursor를 완전히 종료했다가 다시 실행하고 Cursor의 MCP 설정 화면에서 `doc-bridge`가 활성 상태인지 확인합니다. 첫 요청은 다음처럼 읽기 전용으로 시작합니다.
+설치 후 Cursor를 완전히 종료했다가 다시 실행하고 Cursor의 MCP 설정 화면에서 `doc-bridge`가 활성 상태인지 확인합니다. 첫 요청은 다음처럼 읽기 전용으로 시작합니다. 이후 한 앱만 다룰 때는 `core_get_status`에 해당 `app` 필터를 쓰고 ping·전체 앱 조회를 반복하지 않습니다.
 
 ```text
-doc-bridge로 core_ping과 core_get_status를 실행하고 Excel, 한글, AutoCAD 연결 상태만 보여줘. 아직 수정하지 마.
+doc-bridge로 core_get_status를 실행하고 연결된 문서만 보여줘. 아직 수정하지 마.
 ```
 
 배포본은 `%LOCALAPPDATA%\DocBridge\generated-configs\cursor`에 다음 파일을 설치합니다.
@@ -109,7 +111,9 @@ doc-bridge로 core_ping과 core_get_status를 실행하고 Excel, 한글, AutoCA
 - `rules\docbridge-safe-automation.mdc`: 프로젝트의 `.cursor\rules`에 선택적으로 복사하는 규칙
 - `CURSOR_USAGE.md`: 전역/프로젝트 설정, 승인 작업, 대형 CAD 후속조회 안내
 
-쓰기 작업은 반드시 `dryRun=true`의 diff와 confirmToken을 사용자에게 보여 주고 승인을 받은 뒤 정확히 같은 ops로 적용하고 readback합니다. confirmToken은 5분 동안 한 번만 유효하므로 ops가 바뀌거나 사용자가 같은 문서를 수정했으면 재사용하지 않습니다. Cursor와 Codex·Claude·Kimi가 동시에 연결되어 있어도 같은 문서를 동시에 편집하면 안 됩니다.
+일반적인 사용자 편집 요청은 그 범위의 승인입니다. 클라이언트 권한 UI와 서버 사전 검사, 사람의 범위 승인을 구분합니다. 모든 쓰기마다 재승인 질문을 요구하지 않으며, 이미 요청한 저장·PDF도 새 질문을 무조건 요구하지 않습니다. `highRiskConfirm`은 권한 UI를 대체하거나 사람 승인을 증명하지 않습니다.
+
+범위가 명확한 일반 편집(`autoExecuteOps`)은 `executionMode=execute`, 새 UUID `requestId`, `expectedDocumentRef`(Excel/CAD는 저장된 절대 경로만)로 한 번에 적용하고 응답 `readback`을 확인합니다. 이 객체에 `dryRun`/`confirmToken`/`highRiskConfirm`을 false로라도 넣지 않습니다. 미리보기·고위험·구조 변경은 기존처럼 `dryRun=true`의 diff와 confirmToken을 받은 뒤 정확히 같은 ops로 적용합니다. confirmToken은 5분 동안 한 번만 유효하므로 ops가 바뀌거나 사용자가 같은 문서를 수정했으면 재사용하지 않습니다. Cursor와 Codex·Claude·Kimi가 동시에 연결되어 있어도 같은 문서를 동시에 편집하면 안 됩니다.
 
 공식 문서: [Cursor MCP](https://docs.cursor.com/context/model-context-protocol), [Cursor Rules](https://docs.cursor.com/context/rules)
 
@@ -188,12 +192,11 @@ tool_timeout_sec = 300
 
 ## 6. 첫 작업
 
-1. Excel, 한글 또는 AutoCAD에서 대상 문서를 엽니다. Excel 쓰기는 대상 통합문서가 이미 열려 있어야 합니다. 한글 파일을 창 없이 처리하려면 절대 파일 경로를 준비합니다.
-2. AI에게 `core_get_status`로 먼저 상태를 읽게 합니다. Excel은 `connected:true`이고 `document`가 비어 있지 않을 때만 컨텍스트를 읽고, 한글은 `hwp_doctor`, 복잡한 Excel은 `excel_inspect(scope="diagnostics")`도 실행합니다.
-3. AI가 `*_apply_ops`를 `dryRun: true`로 호출합니다.
-4. diff, affected, warnings를 확인하고 승인합니다.
-5. AI가 정확히 같은 ops와 confirmToken으로 실제 적용합니다.
-6. `readback.verified`와 mismatches를 확인합니다.
+1. Excel, 한글 또는 AutoCAD/GstarCAD에서 대상 문서를 엽니다. Excel 쓰기는 대상 통합문서가 이미 열려 있어야 합니다. 한글은 반환된 `documentRef`/`instanceRef`를 그대로 쓰거나, 창 없이 처리할 때만 절대 파일 경로를 준비합니다.
+2. AI에게 해당 앱만 `core_get_status({"app":"excel"|"hwp"|"cad"|"gstarcad"})`로 상태를 읽게 합니다. Excel은 `connected:true`이고 `document`가 비어 있지 않을 때만 컨텍스트를 읽습니다. 한글 첫 연결이나 오류가 있을 때만 `hwp_doctor`를, 복잡한 Excel만 `excel_inspect(scope="diagnostics")`를 추가합니다.
+3. 일반 편집(`set_values`/`set_formulas`/`format_range` 등 앱별 allowlist)은 `executionMode=execute`와 새 UUID `requestId`, 저장된 절대 경로로 한 번에 적용합니다. Excel/CAD는 인스턴스 바인딩 참조를 쓰지 않습니다. 한글은 반환된 `documentRef`/`instanceRef`를 그대로 씁니다. `Book1`/`Drawing1`은 저장해 경로를 만들지 말고 토큰 경로를 씁니다. CAD dirty 광범위 작업이나 저장 지문 불일치는 거절이며 자동 저장으로 우회하지 않습니다.
+4. 미리보기·고위험·병합/숨김/삭제/저장은 `dryRun: true`의 diff를 확인하고 같은 ops와 confirmToken으로 적용합니다. 원 요청이 이미 그 범위면 재승인 질문을 하지 않습니다.
+5. 응답의 `readback.verified`와 mismatches를 확인합니다. `outcomeUnknown`이면 새 UUID로 재실행하지 말고 문서를 먼저 확인합니다.
 
 Excel 쓰기는 활성 시트를 추정하지 않습니다. AI가 각 op에 정확한 시트를 넣도록 요청합니다.
 
@@ -209,9 +212,13 @@ Excel 경로만 전달해도 닫힌 파일을 자동 실행하지 않습니다. 
       "values": [[1500]]
     }
   ],
-  "dryRun": true
+  "executionMode": "execute",
+  "requestId": "11111111-1111-1111-1111-111111111111",
+  "expectedDocumentRef": "C:\\작업\\고색.xlsx"
 }
 ```
+
+미리보기나 미저장 통합문서는 `dryRun:true` 후 같은 ops와 `confirmToken`을 사용합니다.
 
 `range`를 `"'고색-1구간'!B2"`처럼 시트 한정 형식으로 써도 됩니다. `target.sheet`와 시트 한정 범위를 함께 쓰면 두 시트명이 반드시 같아야 합니다. 숫자는 Excel COM 규격에 맞춰 `Double`로 전달되므로 `Value2 = Int32` 캐스팅 오류가 발생하지 않습니다. 15자리보다 긴 번호·코드의 모든 자릿수를 유지하려면 JSON 문자열로 입력합니다.
 
@@ -289,13 +296,13 @@ hwp_get_active_context.summary.openDocuments로 열린 한글 문서를 전부 �
 | Cursor에서 `doc-bridge`가 보이지 않음 | `%USERPROFILE%\.cursor\mcp.json`의 `mcpServers.doc-bridge.command`가 현재 설치 EXE 절대 경로인지 확인하고 Cursor를 완전히 재시작합니다. `2-TEST.cmd`의 `Cursor global config`와 `MCP handshake`가 [OK]인지 확인합니다. |
 | Cursor 프로젝트에서 다른 설정이 적용됨 | 프로젝트의 `.cursor\mcp.json`에 같은 이름의 서버가 중복됐는지 확인합니다. 설치기는 사용자 전역 파일만 병합하고 프로젝트 파일은 변경하지 않습니다. 한 위치의 구성만 사용하십시오. |
 | Cursor에서 CAD 레이어가 비거나 상태가 안 보임 | 기본 `basic`의 `layers:[]`는 조회 생략이며 `layerSummaryStatus:"omitted"`로 표시합니다. `cad_query_entities(scope="layers")`로 전체 목록을 페이지 조회하십시오. `current`는 현재 작업, `on`은 켜짐, `freeze`는 동결, `locked`는 잠금입니다. `modelVisible`은 켜지고 동결되지 않은 상태이며 뷰포트별 동결·객체 투명도는 별도입니다. `null`은 조회 불가입니다. |
-| CAD 문자가 마우스를 올릴 때만 보임 | 0.4.19는 편집 후 직접 ActiveX `Regen(acAllViewports)`를 수행합니다. `readback.displayRefresh.status`가 `failed`이면 좌표·축척 작업을 반복하지 말고 대상 도면 확인 후 `regen_document`만 dry-run → apply하십시오. 객체 색상·표시·투명도는 `includeGeometry:true`로 확인할 수 있습니다. API 갱신 성공은 육안 배치 검수가 아닙니다. |
+| CAD 문자가 마우스를 올릴 때만 보임 | 0.4.19는 편집 후 직접 ActiveX `Regen(acAllViewports)`를 수행합니다. `readback.displayRefresh.status`가 `failed`이면 좌표·축척 작업을 반복하지 말고 대상 도면 확인 후 `regen_document`만 적용하십시오. 저장된 도면이면 execute allowlist에 있고, 미저장 `Drawing1`은 dry-run → confirmToken입니다. 객체 색상·표시·투명도는 `includeGeometry:true`로 확인할 수 있습니다. API 갱신 성공은 육안 배치 검수가 아닙니다. |
 | startup timeout | `dotnet run` 대신 `dist\doc-bridge-mcp.exe` 절대 경로 사용 |
 | Excel 대상이 다름 | `excel_get_active_context.documentRef` 확인. 제한된 보기·모달 여부는 `excel_inspect(scope="diagnostics")`로 확인 |
 | Cursor 작업 뒤 빈 회색 Excel 창이 남음 | 구버전이 workbook 없는 context를 실행 probe로 호출했거나 Cursor가 DocBridge 실패 뒤 `openpyxl`/`DispatchEx`/PowerShell COM으로 우회한 증상입니다. 최신판 설치 후 Cursor를 완전히 재시작합니다. 최신판은 status/context/dry-run으로 Excel을 만들지 않고, 명시적 `allowOpenFile:true` 읽기만 파일 열기를 허용하며 대체 COM·파일 덮어쓰기 우회를 금지합니다. |
 | Excel이 활성 시트에만 씀 | 최신 배포본은 쓰기에서 활성 시트를 사용하지 않습니다. 각 op에 `target.sheet`를 넣거나 `range`를 `'시트 이름'!A1` 형식으로 지정하십시오 |
 | `Value2 = Int32` 캐스팅 오류 | 최신 배포본은 모든 JSON 숫자를 Excel COM `Double`로 정규화합니다. 구버전을 제거한 뒤 최신 ZIP을 다시 설치하고 AI를 완전히 재시작하십시오 |
-| Excel 창을 닫아도 `EXCEL.EXE`가 남고 추가기능이 사라짐 | 최신 배포본은 Excel COM을 전용 worker가 소유하고, AI가 강제 종료돼도 파이프 EOF에서 자신이 만든 Excel만 정상 회수합니다. 새 ZIP 설치 뒤 Codex·Claude·Kimi·Cursor를 완전히 종료했다 다시 시작하십시오. 기존 사용자 Excel에는 `Quit()`하지 않습니다. |
+| Excel 창을 닫아도 `EXCEL.EXE`가 남고 추가기능이 사라짐 | 구버전 MCP가 Excel COM 참조를 보유하면 추가기능 없는 자동화 인스턴스가 남을 수 있습니다. 최신 ZIP 설치 뒤 AI를 완전히 재시작하십시오. DocBridge가 만든 저장된 통합문서는 `excel_disconnect`와 worker 파이프 정상 종료에서 회수됩니다. 호스트 크래시 뒤에는 소유 Excel이 남는 것이 관측되었으며, 잔류 프로세스가 해결되었다고 보지 마십시오. 사용자가 연 Excel은 강제 종료하지 않습니다. |
 | 한글 실행 창에 연결 안 됨 | 먼저 `hwp_doctor`의 `state`를 확인. 기존 문서는 한글에서 표시하고 새 문서는 `hwp_launch({"newDocument":true})`를 한 번만 호출. 특정 파일은 절대 `file` 경로 사용 |
 | 설치 검사에서 `HWP runtime update recommended` 경고 | DocBridge·TypeLib·자동화 환경은 정상이지만 한글 실행 파일이 권장 패치보다 오래된 상태입니다. 자동화 차단이 아니라 안정성 권고이며 `ownedAutomationBlocked:false`이면 계속 사용할 수 있습니다. 가능할 때 한컴 자동 업데이트 후 `2-TEST.cmd`를 다시 실행하십시오. |
 | `PopupBorderImpl`/`TourPopup` `TypeInitializationException` | 오류 창에서 **아니요(N)**를 눌러 문서를 유지합니다. 먼저 0.4.10 이상을 설치하고 `hwp_doctor`의 `automationWindowsDirectory`, `automationEnvironmentPolicy`, `ownedAutomationBlocked`를 확인합니다. 0.4.10은 실제 오류창이 감지될 때만 동일 호출 재시도를 중단합니다. 환경 복구 후에도 오류가 남으면 [한컴 자동 업데이트 2024](https://help.hancom.com/hoffice130/ko-KR/HCell/introduction/update.htm)를 실행하십시오. |

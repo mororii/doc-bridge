@@ -1,5 +1,10 @@
 # Excel RCW 수명주기 핫픽스
 
+현재 상태(0.4.20): 아래 “disconnect/worker EOF 뒤 잔류 PID 없음”은 0.4.15 당시 수용 기준이다.
+이후 호스트 크래시 경로에서 소유 `EXCEL.EXE` 잔류가 관측되었다. 저장된 소유 통합문서의
+정상 disconnect/파이프 정리는 지원한다. 사용자 Excel은 강제 종료하지 않는다. 잔류 없음
+기준을 현재 보장으로 읽지 마십시오. 현재 계약은 [RELEASE-0.4.20.md](RELEASE-0.4.20.md)를 따른다.
+
 DocBridge 0.4.15는 Excel COM 객체의 공유 RCW(Runtime Callable Wrapper)를 과도하게 최종
 해제하던 0.4.14 결함을 수정합니다. 이 문서는 개인 PC 경로와 업무 문서를 포함하지 않는 일반화된
 기술 기록입니다.

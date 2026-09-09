@@ -147,7 +147,11 @@ public sealed class OperationValidator
         [("draw_entities", "entities")] = "array of CAD entity objects",
         [("set_values", "values")] = "2D array of cell values, e.g. [[1,2],[3,4]]",
         [("set_formulas", "formulas")] = "2D array of formula strings, e.g. [[\"=SUM(A1:A2)\"]]",
+        [("format_range", "style")] = ExcelStyleContract.StyleExpectation,
     };
+
+    public const string ExecutionModeLegacy = "legacy";
+    public const string ExecutionModeExecute = "execute";
 
     public sealed record ParsedBatch(
         List<JsonObject> Ops,
@@ -155,7 +159,11 @@ public sealed class OperationValidator
         string? ConfirmToken,
         bool HighRiskConfirm,
         bool HasHighRiskOps,
-        IReadOnlyList<string> OptimizationWarnings);
+        IReadOnlyList<string> OptimizationWarnings,
+        string ExecutionMode = ExecutionModeLegacy,
+        string? RequestId = null,
+        string? ExpectedDocumentRef = null,
+        string? ExplicitDocumentRef = null);
 
     public ParsedBatch? Validate(JsonObject? batch, string app, List<string> errors)
     {
@@ -208,7 +216,11 @@ public sealed class OperationValidator
                     ValidateField(op, i, name, field, type, errors);
 
             if (app.Equals("excel", StringComparison.OrdinalIgnoreCase))
+            {
                 ValidateExcelTarget(op, i, name, errors);
+                if (string.Equals(name, "format_range", StringComparison.OrdinalIgnoreCase))
+                    ExcelStyleContract.Validate(Json.GetObj(op, "style"), i, errors);
+            }
 
             ops.Add(op);
         }
@@ -251,11 +263,70 @@ public sealed class OperationValidator
         var dryRun = !batch.TryGetPropertyValue("dryRun", out var dv) || Json.GetBool(batch, "dryRun", true);
         var confirmToken = Json.GetString(batch, "confirmToken");
         var highRiskConfirm = Json.GetBool(batch, "highRiskConfirm", false);
+        var executionModeRaw = Json.GetString(batch, "executionMode");
+        var isExecute = false;
+        string? requestId = null;
+        string? expectedDocumentRef = null;
+        string? explicitDocumentRef = null;
+
+        if (batch.ContainsKey("executionMode"))
+        {
+            if (!string.Equals(executionModeRaw, ExecutionModeExecute, StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("executionMode must be 'execute' when present; omit it for the legacy dry-run/token path");
+            }
+            else
+            {
+                isExecute = true;
+                dryRun = false;
+                if (batch.ContainsKey("dryRun"))
+                    errors.Add("executionMode=execute cannot be combined with dryRun; use the legacy token path for previews");
+                if (batch.ContainsKey("confirmToken"))
+                    errors.Add("executionMode=execute cannot be combined with confirmToken");
+                if (batch.ContainsKey("highRiskConfirm"))
+                    errors.Add("executionMode=execute cannot be combined with highRiskConfirm; high-risk edits require the legacy review path");
+
+                if (!ExecuteJournalService.TryNormalizeRequestId(Json.GetString(batch, "requestId"), out var normalizedId))
+                    errors.Add("executionMode=execute requires requestId as a UUID");
+                else
+                    requestId = normalizedId;
+
+                expectedDocumentRef = Json.GetString(batch, "expectedDocumentRef");
+                if (string.IsNullOrWhiteSpace(expectedDocumentRef))
+                    errors.Add("executionMode=execute requires expectedDocumentRef");
+
+                foreach (var op in ops)
+                {
+                    var name = Json.GetString(op, "op") ?? "";
+                    var classification = _policy.ClassifyOp(app, name);
+                    if (classification is OpClass.HighRisk or OpClass.Forbidden or OpClass.Unknown)
+                        errors.Add($"executionMode=execute cannot run '{name}' ({classification}); use the legacy dry-run review path");
+                    else if (!_policy.IsAutoExecutable(app, name))
+                        errors.Add(
+                            $"executionMode=execute does not allow '{name}' on {app}; " +
+                            "structural edits, deletion, save/export, cross-document, and activate_document stay on the token path");
+                }
+
+                if (!string.IsNullOrWhiteSpace(expectedDocumentRef) && errors.Count == 0)
+                {
+                    var bind = DocumentTargetBinder.BindForExecute(app, ops, expectedDocumentRef);
+                    if (!bind.Ok)
+                        errors.AddRange(bind.Errors);
+                    else
+                    {
+                        expectedDocumentRef = bind.NormalizedExpected ?? expectedDocumentRef;
+                        explicitDocumentRef = bind.ExplicitDocumentRef;
+                    }
+                }
+            }
+        }
 
         if (errors.Count > 0) return null;
         return new ParsedBatch(
             ops, dryRun, confirmToken, highRiskConfirm, hasHighRisk,
-            BuildOptimizationWarnings(app, ops));
+            BuildOptimizationWarnings(app, ops),
+            isExecute ? ExecutionModeExecute : ExecutionModeLegacy,
+            requestId, expectedDocumentRef, explicitDocumentRef);
     }
 
     /// <summary>
@@ -332,7 +403,7 @@ public sealed class OperationValidator
     {
         "hwp" => new[] { "file", "documentRef" },
         "excel" => new[] { "target", "targetWorkbook" },
-        "cad" => new[] { "document" },
+        "cad" or "gstarcad" => new[] { "document" },
         _ => Array.Empty<string>(),
     };
 

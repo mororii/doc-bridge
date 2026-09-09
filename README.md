@@ -1,19 +1,37 @@
-# DocBridge 0.4.19
+# DocBridge 0.4.20
 
-Windows의 Microsoft Excel, 한컴 한글(HWP/HWPX), AutoCAD를 Kimi·Claude·Codex·Cursor가 공통 MCP 도구로 읽고 수정하게 하는 로컬 브리지입니다.
+Windows의 Microsoft Excel, 한컴 한글(HWP/HWPX), AutoCAD 및 GstarCAD를 Kimi·Claude·Codex·Cursor가 공통 MCP 도구로 읽고 수정하게 하는 로컬 브리지입니다.
 
-모든 쓰기는 서버에서 다음 순서를 강제합니다.
+쓰기는 서버가 두 경로 중 하나로 적용합니다. 일반적인 사용자 편집 요청은 그 범위의 승인입니다. 클라이언트 신뢰/도구 권한 UI, 서버 사전 검사, 사람의 작업 범위 승인을 같은 것으로 보지 마십시오. 이미 요청한 저장·PDF를 포함해 모든 쓰기마다 재승인 질문을 요구하지 않습니다. `highRiskConfirm`은 권한 UI를 무력화하거나 사람 승인 사실을 인증하지 않습니다.
 
 ```text
-read → dry-run(diff + snapshot + confirmToken) → 요청 범위 검증
-     → 동일 ops + confirmToken apply → readback 검증 → audit log
+미리보기·고위험: read → dry-run(diff + snapshot + confirmToken)
+                 → 동일 ops + confirmToken apply → readback → audit
+
+일반 편집(앱별 autoExecuteOps): status(app) → 필요한 범위 읽기
+                 → executionMode=execute + UUID requestId + expectedDocumentRef
+                 → 한 호출에서 사전검사·snapshot·apply·readback·실패 시 복구
 ```
 
 처음 설치한다면 [INSTALL.md](INSTALL.md)를 먼저 보세요.
 
 ## 현재 검증 상태
 
-2026-09-03: Core 비-E2E 218개 + MCP 19개 통과. 별도 실AutoCAD 임시 도면에서 문자 이동·축척, 자동/명시적 화면 재생성, 레이어 상태·켜짐 변경을 검증했습니다. 기존 사용자 도면의 저장 상태와 객체 수는 보존했습니다. 자세한 내용은 [0.4.19 릴리즈 노트](docs/RELEASE-0.4.19.md)를 참고하세요.
+0.4.20은 GstarCAD 전용 `gstarcad_*` 도구 4개를 추가합니다. 기존 `cad_*`는 AutoCAD 전용으로 유지합니다. 연결 인스턴스, 승인 토큰, 스냅샷은 제품별로 분리하며 자동 대체 연결하지 않습니다. 기본 편집만 지원하고 해치·문서 간 복사·XREF·배치 편집·PDF·스크립트·RGB 색상은 차단합니다. 미지원 기능을 검증했다고 쓰지 않습니다. [GstarCAD 사용·검증 안내](docs/GSTARCAD.md)를 참고하세요.
+
+일반 편집은 앱별 `autoExecuteOps`에서 `executionMode=execute`로 한 번에 적용할 수 있습니다. Excel은 `set_values`/`set_formulas`/`format_range`, 한글은 `default.policy`와 `core_get_capabilities`의 현재 목록(커서 삽입 `insert_text`는 제외), CAD/GstarCAD는 `set_text_value`/`set_layer_visibility`/`set_layer_color`/`regen_document`만입니다. Excel/CAD/GstarCAD execute는 저장된 절대 경로만 안내합니다. 현재 어댑터는 인스턴스 바인딩 참조를 발급하지 않습니다. `Book1`/`Drawing1` 같은 미저장 이름은 기존 토큰 경로이며, 경로를 만들기 위해 자동 저장하지 않습니다. 한글은 반환된 `documentRef`/`instanceRef`를 그대로 사용합니다. 미리보기와 고위험·구조 변경·삭제·저장·내보내기는 기존 dry-run → 같은 ops/`confirmToken` 경로입니다. CAD dirty 광범위 작업이나 저장 지문이 맞지 않으면 거절하며, 자동 저장으로 우회하지 않습니다.
+
+Excel 서식-only는 v3 `written-properties` 스냅샷을 씁니다. Bold만 바꾸면 다른 색·tint를 읽거나 복구하지 않습니다. 이전 v2 전체 서식 스냅샷도 복구합니다. 오래된 format preview 토큰은 새 dry-run이 필요할 수 있습니다. 셀 한도 100,000과 STA 120초는 올리지 않았습니다. 저장된 소유 통합문서의 정상 disconnect/파이프 정리는 지원하지만 호스트 크래시 뒤 Excel 잔류는 반증 전까지 미해결입니다.
+
+확인된 범위의 숫자와 단일 표본 제한은 [PERFORMANCE.md](docs/PERFORMANCE.md)와 [RELEASE-0.4.20.md](docs/RELEASE-0.4.20.md)에 있습니다.
+
+- 통합 Release `-warnaserror` 경고 0·오류 0, 비-E2E Core 421·MCP 20.
+- Excel 균일 Bold 1,000/7,000셀과 혼합 1,000/7,000셀 전수 mismatch 0. 균일 7,000셀 execute 0.459초와 혼합 7,000셀 82.809초는 다른 작업이다. 만능 속도 배수를 만들지 않는다.
+- 실제 COM 장애 원복, UUID 재전송 challenge/conflict, 작은 회귀 9건. 보호시트 건은 `rollback.verified=false`를 숨기지 않으며 원복 성공이 아니다.
+- 한글 일반 execute/UUID 1건(31.269초), 제작 format/table/page/picture/PDF 1건(10.833초). 완성 문서 디자인 검수로 주장하지 않는다.
+- AutoCAD/GstarCAD geometry production 2건(Gstar 25.382초, AutoCAD 4.204초). execute 최종 fixture 2행은 Gstar 23.390초, AutoCAD 4.281초. 두 시간은 다른 표본이며 합산하지 않는다. 미지원 Gstar 기능은 검증 범위가 아니다.
+- `core_get_status` app 필터는 불필요한 앱 조회를 줄였으나 전체 status 속도 개선은 입증되지 않았다.
+- 배포 ZIP·격리 설치는 패키지 생성 단계의 범위다. 전체 소스 릴리즈 완료를 주장하지 않는다.
 
 이전 버전의 검증 기록(2026-08-31 기준):
 
@@ -76,7 +94,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\publish.ps1 -Sel
 .codex-plugin/plugin.json  Codex 플러그인 매니페스트
 skills/document-automation Codex용 안전 작업 지침
 src/DocBridge.Core         정책, 토큰, 스냅샷, 감사 로그, 앱 어댑터
-src/DocBridge.Mcp          stdio/HTTP MCP 서버와 25개 tool
+src/DocBridge.Mcp          stdio/HTTP MCP 서버와 29개 tool
 src/DocBridge.HwpWorker    한글 COM 장애 격리·자동 교체 worker
 src/DocBridge.Cli          MCP를 못 쓰는 환경용 동일 기능 CLI
 ops/                       allowlist 정책, 스키마, CAD 허용 템플릿
@@ -94,7 +112,7 @@ tests/                     단위, 프로토콜, 실제 앱 E2E
 
 Cursor용 안전 규칙과 상세 안내는 [Cursor 사용 안내](clients/cursor/CURSOR_USAGE.md)에 있습니다. 프로젝트 규칙은 [docbridge-safe-automation.mdc](clients/cursor/rules/docbridge-safe-automation.mdc)를 `<프로젝트>\.cursor\rules`에 선택적으로 복사하고, 모든 프로젝트에 적용할 사용자 규칙은 [docbridge-user-rule.txt](clients/cursor/docbridge-user-rule.txt)를 Cursor Settings → Rules에 붙여 넣습니다. 설치기는 두 템플릿을 `%LOCALAPPDATA%\DocBridge\generated-configs\cursor`에도 복사합니다.
 
-Cursor와 Codex·Claude·Kimi를 함께 연결할 수는 있지만 같은 Excel·한글·AutoCAD 문서를 동시에 수정하면 안 됩니다. 먼저 한 클라이언트의 작업과 readback을 끝낸 뒤 다른 클라이언트에서 문서를 다시 읽고 새 dry-run을 만듭니다. 공식 설정 위치와 규칙 형식은 [Cursor MCP 문서](https://docs.cursor.com/context/model-context-protocol)와 [Cursor Rules 문서](https://docs.cursor.com/context/rules)를 참고하십시오.
+Cursor와 Codex·Claude·Kimi를 함께 연결할 수는 있지만 같은 Excel·한글·AutoCAD 문서를 동시에 수정하면 안 됩니다. 한 클라이언트의 작업과 readback을 끝낸 뒤 다른 클라이언트에서 문서를 다시 읽고 새 execute 또는 dry-run을 만듭니다. 공식 설정 위치와 규칙 형식은 [Cursor MCP 문서](https://docs.cursor.com/context/model-context-protocol)와 [Cursor Rules 문서](https://docs.cursor.com/context/rules)를 참고하십시오.
 
 ## MCP tools
 
@@ -104,8 +122,9 @@ Cursor와 Codex·Claude·Kimi를 함께 연결할 수는 있지만 같은 Excel�
 | Excel | `excel_get_active_context`, `excel_read_range`, `excel_inspect`, `excel_apply_ops`, `excel_disconnect` |
 | 한글 | `hwp_plan_creation`, `hwp_launch`, `hwp_get_active_context`, `hwp_doctor`, `hwp_repair_typelib`, `hwp_read_text`, `hwp_apply_ops`, `hwp_submit_ops`, `hwp_get_job` |
 | CAD | `cad_launch`, `cad_get_active_context`, `cad_query_entities`, `cad_apply_ops` |
+| GstarCAD | `gstarcad_launch`, `gstarcad_get_active_context`, `gstarcad_query_entities`, `gstarcad_apply_ops` |
 
-허용 op는 [default.policy.json](ops/policies/default.policy.json)에서 관리합니다. 목록에 없는 op, 임의 매크로, 외부 스크립트는 차단됩니다. `export_pdf`처럼 기존 출력 파일을 교체할 수 있는 작업은 별도의 고위험 확인이 필요합니다.
+허용 op와 `autoExecuteOps`는 [default.policy.json](ops/policies/default.policy.json)과 `core_get_capabilities`에서 확인합니다. 목록에 없는 op, 임의 매크로, 외부 스크립트는 차단됩니다. `export_pdf`처럼 기존 출력 파일을 교체할 수 있는 작업은 기존 dry-run 경로와 별도의 고위험 확인이 필요합니다. `core_get_status`는 `app`으로 한 앱만 조회할 수 있습니다. 한 앱 작업에 ping·전체 앱 status·반복 context·전체 읽기·별도 승인·전체 재조회를 강제하지 않습니다.
 
 Excel 병합·숨김 5종의 정확한 payload, `includeLayout`, batch 분리 규칙과 후속 기능 단계는 [Excel 기본 편집 operations](docs/EXCEL-OPERATIONS.md)를 참고하세요.
 
@@ -115,11 +134,11 @@ MCP 2025 tool annotation으로 읽기/파괴 가능 도구를 표시하지만, �
 
 ### Excel
 
-- Excel COM은 전용 `--excel-worker` 프로세스가 소유합니다. MCP/CLI가 강제 종료돼도 파이프 EOF를 받은 worker가 저장 상태를 확인하고 자신이 만든 Excel만 정상 종료하므로, 추가기능이 없는 유령 `EXCEL.EXE`가 남지 않습니다.
+- Excel COM은 전용 `--excel-worker` 프로세스가 소유합니다. DocBridge가 만든 저장된 통합문서는 `excel_disconnect`와 worker 파이프 정상 종료에서 회수됩니다. 호스트가 비정상 종료된 뒤에는 빈 인스턴스와 저장된 소유 통합문서 모두에서 `EXCEL.EXE`가 남는 것이 관측되었습니다. 잔류 프로세스가 해결되었다고 보지 마십시오. 사용자가 연 Excel은 강제 종료하지 않습니다.
 - 실행 중인 Excel을 찾으면 `ownsInstance=false`로 연결하여 참조만 해제하고 절대 `Quit()`하지 않습니다. 실행 중인 Excel이 없을 때만 표시 상태(`Visible=true`)로 새 인스턴스를 만들고 `ownsInstance=true`로 추적합니다.
 - Excel을 종료하고 다시 실행해도 살아 있는 창과 workbook을 재탐색해 같은 MCP 세션에서 COM 연결을 자동 복구합니다.
 - 실행 중인 Excel의 활성 workbook에 연결하고, `copy_sheet`는 모든 Excel 인스턴스를 내부 COM으로 탐색합니다.
-- `core_get_status`는 Excel을 실행하지 않습니다. `apps.excel.connected:true`이고 `document`가 비어 있지 않을 때만 `excel_get_active_context`를 호출하며, 상태가 바뀌지 않은 실패를 반복하지 않습니다.
+- `core_get_status({"app":"excel"})`는 Excel을 실행하지 않습니다. `apps.excel.connected:true`이고 `document`가 비어 있지 않을 때만 `excel_get_active_context`를 호출하며, 상태가 바뀌지 않은 실패를 반복하지 않습니다.
 - workbook 경로만으로 닫힌 파일을 자동 실행하지 않습니다. 사용자가 닫힌 기존 파일을 열어 **읽으라고 명시한 경우에만** 절대 경로와 `allowOpenFile:true`를 함께 사용할 수 있고, 쓰기는 Excel에서 이미 열린 workbook만 대상으로 합니다.
 - DocBridge 연결 오류를 `openpyxl`, `pywin32`/직접 Excel COM, PowerShell COM, `Start-Process` 또는 UI 자동화로 우회하지 않습니다. 이런 우회는 서식·매크로 손상이나 통합문서 없는 회색 Excel 인스턴스를 남길 수 있습니다.
 - 문자열·논리값·수식을 보존하고, 숫자는 Excel `Range.Value2`의 실제 COM 형식인 `Double`로 정규화해 `Int32` SAFEARRAY 캐스팅 오류를 방지합니다. 15자리보다 긴 식별번호는 숫자가 아니라 문자열로 입력합니다.
@@ -128,18 +147,21 @@ MCP 2025 tool annotation으로 읽기/파괴 가능 도구를 표시하지만, �
 - `merge_cells`는 좌상단 외 셀의 값·수식 손실 가능성과 기존 병합 영역의 부분 겹침을 차단합니다. `unmerge_cells`는 한 병합 영역 안의 단일 셀 또는 병합 영역 전체를 대상으로 하며 두 op는 한 batch에서 단독으로 실행합니다.
 - `set_rows_hidden`/`set_cols_hidden`은 `hidden:true|false`, `set_sheet_visibility`는 `visibility:"hidden"|"visible"`을 사용합니다. 활성 시트와 마지막 표시 시트는 숨기지 않으며 `veryHidden` 신규 설정은 지원하지 않습니다.
 - 병합·숨김 상태를 확인하려면 `excel_read_range`에 `includeLayout:true`를 지정합니다. visibility op는 서로 한 batch에 묶을 수 있지만 값·서식·복사·병합 op와는 별도 dry-run으로 나눕니다.
-- 셀 값·수식·`format_range` 서식, `insert_rows`/`insert_cols` 구조를 스냅샷에서 복원합니다.
+- `format_range`는 `bold`/`fontBold`, `italic`/`fontItalic`, `fillColor`/`interiorColor`/`fill` 별칭을 받고 충돌·미지원 키는 snapshot 전에 거부합니다. dry-run before는 실제 셀 서식이며, 채움 없음은 `fillPattern`으로 검정(`Color=0`)과 구분합니다. v3 `styleScope=written-properties`는 실제로 쓰는 속성과 색 커플링만 스냅샷·지문·복구합니다. Bold-only는 다른 색·tint를 건드리지 않습니다. 균일 bool/글꼴 크기/`NumberFormat`은 범위 빠른 경로를 쓰고, 혼합·색은 필요한 셀 상태를 확보한 뒤 복구 후 확인합니다. 부분 병합·혼합 리치 텍스트·비테마 RGB+tint는 쓰기 전에 거절합니다. 테마 tint는 허용합니다. 값·수식·구조가 섞인 배치는 전 문서 지문을 쓰지 않고 새 preview를 받습니다. 이전 v2 전체 서식 스냅샷도 복구합니다.
+- 셀 값·수식·`format_range` 서식, `insert_rows`/`insert_cols` 구조를 스냅샷에서 복원하려고 시도합니다. 보호된 시트에서 Bold 등 COM 쓰기가 거절되면 롤백도 같은 보호 때문에 쓰지 못하고 `rollback.verified`는 false입니다. 모든 적용 실패가 검증된 롤백으로 끝난다고 보지 마십시오. 적용 실패는 op별 HRESULT와 `skipped`를 남기고, COM readback과 화면 육안 품질을 같은 증거로 쓰지 않습니다.
 - `copy_sheet`는 같은 프로세스뿐 아니라 서로 다른 Excel 프로세스 사이에서도 시트 서식·수식·열 너비를 보존합니다.
 - `copy_sheet` 복구는 복사된 시트만 제거하고 원래 시트 순서·활성 시트를 확인합니다. 기존 셀 수식을 전체 재기록하지 않도록 다른 Excel op와 한 배치에 섞는 것은 거부하며, 복사 후 새 dry-run 배치로 후속 편집합니다.
-- 쓰기 전에 dry-run의 `documentRef`가 현재 활성 workbook과 같은지 다시 검사합니다.
+- 쓰기 전에 execute `expectedDocumentRef` 또는 dry-run의 `documentRef`가 현재 활성 workbook과 같은지 다시 검사합니다.
 - `excel_inspect`는 시트별 사용범위·표·차트·도형·피벗, 수식 오류 셀, Protected View와 모달/수식 편집 상태를 읽기 전용으로 진단합니다.
 
-Excel 인스턴스가 여러 개면 `excel_get_active_context`의 `documentRef`를 반드시 확인한 뒤 승인하세요. E2E 도구도 대상 임시 workbook이 아니면 쓰기를 즉시 중단합니다.
+Excel 인스턴스가 여러 개면 `excel_get_active_context`의 저장된 절대 경로 `documentRef`를 확인합니다. E2E 도구도 대상 임시 workbook이 아니면 쓰기를 즉시 중단합니다.
 연결만 즉시 놓으려면 `excel_disconnect` 또는 `core_disconnect({"app":"excel"})`를 호출합니다. 이 명령도 사용자 인스턴스는 종료하지 않습니다.
 
 ```json
-{"ops":[{"op":"set_values","target":{"sheet":"매출"},"range":"B2","values":[[1500]]}],"dryRun":true}
+{"ops":[{"op":"set_values","target":{"sheet":"매출"},"range":"B2","values":[[1500]]}],"executionMode":"execute","requestId":"11111111-1111-1111-1111-111111111111","expectedDocumentRef":"C:\\작업\\매출.xlsx"}
 ```
+
+미리보기나 미저장 `Book1`은 기존처럼 `dryRun:true` 후 같은 ops와 `confirmToken`을 씁니다. execute 객체에 `dryRun`/`confirmToken`/`highRiskConfirm`을 false로라도 넣지 않습니다. `requestId`는 호출마다 새 UUID이고, 같은 작업의 통신 재시도만 같은 UUID를 재사용합니다. 같은 UUID·앱·문서·ops는 저장된 결과를 다시 주고, 다른 payload는 거절합니다. `outcomeUnknown`이면 새 UUID로 무작정 재실행하지 말고 문서 상태를 먼저 확인합니다.
 
 배포되는 PowerShell 스크립트는 Windows PowerShell 5.1 호환 UTF-8 BOM으로 검사됩니다. DocBridge의 일반 Excel 편집은 VBA를 사용하지 않습니다. 외부 VBA 모듈 교환이 꼭 필요한 고급 사용자는 배포본의 `support\Convert-DocBridgeTextEncoding.ps1`로 `.bas`를 CP949/CRLF로 변환한 뒤 가져옵니다.
 
@@ -191,14 +213,15 @@ Excel 인스턴스가 여러 개면 `excel_get_active_context`의 `documentRef`�
 - 임의 script는 실행하지 않으며 `ops/script-templates`의 등록 템플릿만 허용합니다.
 - 템플릿 매개변수의 제어문자, 경로/명령 삽입, 미해결 placeholder를 차단합니다.
 
-`delete_entities`와 `run_script_template`은 별도 `highRiskConfirm=true`가 필요합니다. 레이어/텍스트는 자동 복원되지만 이동·회전·삭제 등 geometry 전체 자동 복원은 보장하지 않습니다. 이 경우 스냅샷의 `drawing-backup*.dwg`를 직접 열어 복구해야 합니다.
+`delete_entities`와 `run_script_template`은 기존 dry-run 경로와 별도 `highRiskConfirm=true`가 필요합니다. execute는 저장된 절대 경로의 문자·레이어·regen만이며 도형·저장은 토큰 경로입니다. dirty 광범위 작업이나 저장 지문이 맞지 않으면 거절합니다. `Drawing1`을 저장해 경로를 만들거나 지문 거절을 우회하지 않습니다. 요청한 문자 핸들·레이어 속성 스냅샷은 그 범위만 완전 복구할 수 있으며 전체 도면 복구가 아닙니다. Geometry 스냅샷은 drawing-backup과 부분 상태이며 자동 복구 성공을 보장하지 않습니다. 이 경우 스냅샷의 `drawing-backup*.dwg`를 직접 열어 복구해야 합니다.
 
 ## 보안·운영
 
 - confirmToken: HMAC-SHA256, 5분 TTL, 1회용, app/scope/정확한 ops에 바인딩
+- execute `requestId`: UUID, 같은 앱/문서/ops만 재전송, 충돌 키(`dryRun`/`confirmToken`/`highRiskConfirm`) 포함 금지
 - 토큰 발급 후 활성 문서가 바뀌면 apply 거부
 - COM 호출: STA 스레드와 전역 named mutex로 직렬화
-- 쓰기 전 스냅샷, 쓰기 후 실제 값 readback
+- 쓰기 전 스냅샷, 쓰기 후 실제 값 readback. execute는 한 잠금 안에서 사전검사부터 복구까지 수행
 - 감사 로그: `%LOCALAPPDATA%\DocBridge\logs\audit-YYYYMMDD.jsonl`
 - 스냅샷: `%LOCALAPPDATA%\DocBridge\snapshots\<app>\...`
 - HTTP: 기본 `127.0.0.1`만 bind, 선택적 `DOCBRIDGE_HTTP_TOKEN` Bearer 인증

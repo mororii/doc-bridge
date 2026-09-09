@@ -7,7 +7,7 @@
   "required": ["ok", "app"],
   "properties": {
     "ok": { "type": "boolean" },
-    "app": { "type": "string", "enum": ["excel", "hwp", "cad", "fake"] },
+    "app": { "type": "string", "enum": ["excel", "hwp", "cad", "gstarcad", "fake"] },
     "documentRef": {
       "type": ["string", "null"],
       "description": "열린 문서의 경로 또는 식별자. 문서 없으면 null"

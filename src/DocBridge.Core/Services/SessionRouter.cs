@@ -26,6 +26,7 @@ public sealed class SessionRouter : IDisposable
                 : new ExcelAdapter(),
             ["hwp"] = () => new HwpWorkerAdapter(),
             ["cad"] = () => new CadAdapter(),
+            ["gstarcad"] = () => new CadAdapter(product: CadProduct.GstarCad),
         };
     }
 

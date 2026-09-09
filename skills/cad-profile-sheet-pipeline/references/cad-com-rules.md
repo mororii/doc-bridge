@@ -20,13 +20,12 @@
 
 ## 안전 순서
 
-1. 활성 문서와 열린 문서를 읽고 대상 경로와 ModelSpace 개수를 기록한다.
+1. `core_get_status({"app":"cad"})`로 시작하고 활성 문서와 열린 문서를 읽어 대상 경로와 ModelSpace 개수를 기록한다. ping·전체 앱 조회를 반복하지 않는다.
 2. 범위·레이어·문자 필터로 소스 객체를 확정한다.
-3. 같은 ops를 `dryRun: true`로 보내 diff, snapshotId, confirmToken을 받는다.
-4. diff의 대상 문서, 좌표, 객체 수를 확인한다.
-5. 동일 ops와 confirmToken으로 적용한다.
-6. `verified: true`이고 `mismatches`가 비어 있는지 확인한다.
-7. 시작 인덱스부터 증분 조회해 실제 bbox·문자·XREF 속성을 확인한다.
+3. 문자·레이어·regen만 저장된 도면의 절대 경로에서 `executionMode=execute`로 한 번에 적용한다. 현재 어댑터는 인스턴스 바인딩 참조를 발급하지 않는다. dirty 광범위 작업이나 저장 지문이 맞지 않으면 거절하며, 자동 저장으로 우회하지 않는다. 복사·XREF·도형·삭제·저장은 같은 ops를 `dryRun: true`로 보내 diff, snapshotId, confirmToken을 받는다.
+4. 토큰 경로는 diff의 대상 문서, 좌표, 객체 수를 확인한 뒤 동일 ops와 confirmToken으로 적용한다. 원 요청이 이미 그 범위면 재승인 질문을 하지 않는다.
+5. 응답 `readback.verified`와 `mismatches`를 확인한다. 문자·레이어 스냅샷은 그 범위만 복구하며 전체 도면 복구가 아니다.
+6. 시작 인덱스부터 필요한 증분 조회만 해 실제 bbox·문자·XREF 속성을 확인한다.
 
 ## 조회와 복사
 

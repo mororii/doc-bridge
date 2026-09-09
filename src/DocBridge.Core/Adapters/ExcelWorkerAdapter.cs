@@ -12,7 +12,7 @@ namespace DocBridge.Core.Adapters;
 /// JSON over redirected standard streams. If the host is terminated, the pipe closes and the
 /// worker disposes its ExcelAdapter through the normal save-state-aware path.
 /// </summary>
-public sealed class ExcelWorkerAdapter : IAppAdapter, IConnectionLifecycleAdapter
+public sealed class ExcelWorkerAdapter : IAppAdapter, IConnectionLifecycleAdapter, IPreviewReuseAdapter
 {
     private static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(150);
     private static readonly TimeSpan DiscoveryCallTimeout = TimeSpan.FromSeconds(45);
@@ -122,6 +122,15 @@ public sealed class ExcelWorkerAdapter : IAppAdapter, IConnectionLifecycleAdapte
             ["metadata"] = metadata.DeepClone(),
         });
 
+    public JsonObject ValidatePreviewReuse(
+        string snapshotDir, JsonObject metadata, IReadOnlyList<JsonObject> ops) =>
+        Call("validatePreviewReuse", new JsonObject
+        {
+            ["snapshotDir"] = snapshotDir,
+            ["metadata"] = metadata.DeepClone(),
+            ["ops"] = OpsToJson(ops),
+        });
+
     public JsonObject Disconnect() => Call("disconnect");
 
     private JsonObject Call(string method, JsonObject? payload = null)
@@ -169,6 +178,8 @@ public sealed class ExcelWorkerAdapter : IAppAdapter, IConnectionLifecycleAdapte
         // Keep discovery/read below the common 60-second MCP client deadline so this adapter can
         // reclaim a poisoned worker before the client abandons and restarts the MCP server.
         "status" or "context" or "read" => DiscoveryCallTimeout,
+        // Format-only fingerprint recaptures every target style; it shares apply's 150s budget.
+        "validatePreviewReuse" => CallTimeout,
         _ => CallTimeout,
     };
 
@@ -327,6 +338,10 @@ public static class ExcelWorkerProcess
         "restoreSnapshot" => adapter.RestoreSnapshot(
             Json.GetString(request, "snapshotDir") ?? throw new InvalidDataException("snapshotDir is required"),
             Json.GetObj(request, "metadata") ?? new JsonObject()),
+        "validatePreviewReuse" => adapter.ValidatePreviewReuse(
+            Json.GetString(request, "snapshotDir") ?? throw new InvalidDataException("snapshotDir is required"),
+            Json.GetObj(request, "metadata") ?? new JsonObject(),
+            ParseOps(request)),
         "disconnect" => adapter.Disconnect(),
         _ => throw new InvalidDataException($"unknown Excel worker method '{method}'"),
     };

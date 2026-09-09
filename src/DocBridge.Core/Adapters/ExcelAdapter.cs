@@ -16,7 +16,7 @@ namespace DocBridge.Core.Adapters;
 /// - 금지(정책): delete_sheet, overwrite_workbook_without_backup, run_macro
 /// - snapshot: workbook 파일 복사(저장된 경우) + 시트 값 state.json
 /// </summary>
-public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleAdapter
+public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleAdapter, IPreviewReuseAdapter
 {
     private const int MaxCells = 10000;   // 대용량 읽기 상한 (정책 maxReadCells)
     private const int MaxSnapshotCells = 1000000; // 로컬 복원용 상한 (AI 응답에는 노출하지 않음)
@@ -882,27 +882,7 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                     result["truncated"] = totalCells > cells;
                     if (includeFormulas) result["formulas"] = RangeToJson(rangeObject, out _, formulas: true);
                     if (includeStyles)
-                    {
-                        object? font = null;
-                        object? interior = null;
-                        try
-                        {
-                            font = (object)range.Font;
-                            interior = (object)range.Interior;
-                            result["styles"] = new JsonObject
-                            {
-                                ["numberFormat"] = (string?)range.NumberFormat?.ToString(),
-                                ["fontBold"] = (bool?)((dynamic)font).Bold,
-                                ["fontItalic"] = (bool?)((dynamic)font).Italic,
-                                ["interiorColor"] = (double?)((dynamic)interior).Color,
-                            };
-                        }
-                        finally
-                        {
-                            RotHelper.ReleaseComReference(interior);
-                            RotHelper.ReleaseComReference(font);
-                        }
-                    }
+                        result["styles"] = ExcelStyleContract.WithReadAliases(CaptureRangeStyleSummary(rangeObject));
                     if (includeLayout) result["layout"] = ReadRangeLayout(sheetObject, rangeObject);
                     return result;
                 }
@@ -1078,7 +1058,18 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                             var rangeAddr = resolvedRange.Address;
                             p.Affected.Add(new AffectedRef("range", $"{sheet.Name}!{rangeAddr}"));
                             var style = Json.GetObj(op, "style") ?? new JsonObject();
-                            p.Diff.Add(new DiffEntry { Ref = "style", Before = "current", After = style.DeepClone() });
+                            object? rangeObject = null;
+                            try
+                            {
+                                rangeObject = (object)sheet.Range(rangeAddr);
+                                p.Diff.Add(new DiffEntry
+                                {
+                                    Ref = "style",
+                                    Before = ExcelStyleContract.WithReadAliases(CaptureRangeStyleSummary(rangeObject)),
+                                    After = style.DeepClone(),
+                                });
+                            }
+                            finally { RotHelper.ReleaseComReference(rangeObject); }
                             break;
                         }
                         case "find_replace": PreviewFindReplace(d, wb, op, p); break;
@@ -1295,67 +1286,112 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                 targetApplication.ScreenUpdating = false;
                 try
                 {
-                    foreach (var op in ops)
+                    var skipRemaining = false;
+                    for (var index = 0; index < ops.Count; index++)
                     {
-                        var name = Json.GetString(op, "op")!;
-                        switch (name)
+                        var op = ops[index];
+                        var name = Json.GetString(op, "op") ?? "?";
+                        if (skipRemaining)
                         {
-                            case "set_values": ApplySetValues(wb, op, exec, mismatches, ref checkedCells, formulas: false); break;
-                            case "set_formulas": ApplySetValues(wb, op, exec, mismatches, ref checkedCells, formulas: true); break;
-                            case "insert_rows":
-                            {
-                                var row = Json.GetInt(op, "row")!.Value;
-                                var count = Json.GetInt(op, "count")!.Value;
-                                dynamic sheet = GetRequiredTargetSheet(wb, op);
-                                sheet.Rows[$"{row}:{row + count - 1}"].Insert();
-                                exec.Affected.Add(new AffectedRef("rows", $"{sheet.Name}!{row}:{row + count - 1}"));
-                                break;
-                            }
-                            case "insert_cols":
-                            {
-                                var count = Json.GetInt(op, "count")!.Value;
-                                var col = op["col"]!;
-                                dynamic sheet = GetRequiredTargetSheet(wb, op);
-                                string colName = col is JsonValue jv && jv.TryGetValue<int>(out var ci) ? ColName(ci) : col.GetValue<string>();
-                                var endCol = ColName(ColIndex(colName) + count - 1);
-                                sheet.Columns[$"{colName}:{endCol}"].Insert();
-                                exec.Affected.Add(new AffectedRef("cols", $"{sheet.Name}!{colName}:{endCol}"));
-                                break;
-                            }
-                            case "format_range": ApplyFormat(wb, op, exec, mismatches, ref checkedCells); break;
-                            case "find_replace": ApplyFindReplace(wb, op, exec, mismatches, ref checkedCells); break;
-                            case "copy_sheet": ApplyCopySheet(targetApplication, wb, op, exec, mismatches, ref checkedCells, interaction); break;
-                            case "merge_cells":
-                            case "unmerge_cells":
-                                ApplyMergeOperation((object)wb, op, exec, mismatches, ref checkedCells);
-                                break;
-                            case "set_rows_hidden":
-                            case "set_cols_hidden":
-                            case "set_sheet_visibility":
-                                ApplyVisibilityOperation((object)wb, op, exec, mismatches, ref checkedCells);
-                                break;
+                            exec.OperationResults.Add(BuildSkippedOperation(index, name));
+                            continue;
                         }
 
-                        if (!interaction.Checkpoint(stopOnConcurrentInput: true))
-                            throw new InvalidOperationException(
-                                "[APP_USER_ACTIVITY_DETECTED] Excel이 작업 중 전경으로 전환되어 다음 작업을 중단했습니다");
+                        var opWatch = Stopwatch.StartNew();
+                        var opMismatches = new List<string>();
+                        try
+                        {
+                            switch (name)
+                            {
+                                case "set_values": ApplySetValues(wb, op, exec, opMismatches, ref checkedCells, formulas: false); break;
+                                case "set_formulas": ApplySetValues(wb, op, exec, opMismatches, ref checkedCells, formulas: true); break;
+                                case "insert_rows":
+                                {
+                                    var row = Json.GetInt(op, "row")!.Value;
+                                    var count = Json.GetInt(op, "count")!.Value;
+                                    dynamic sheet = GetRequiredTargetSheet(wb, op);
+                                    sheet.Rows[$"{row}:{row + count - 1}"].Insert();
+                                    exec.Affected.Add(new AffectedRef("rows", $"{sheet.Name}!{row}:{row + count - 1}"));
+                                    break;
+                                }
+                                case "insert_cols":
+                                {
+                                    var count = Json.GetInt(op, "count")!.Value;
+                                    var col = op["col"]!;
+                                    dynamic sheet = GetRequiredTargetSheet(wb, op);
+                                    string colName = col is JsonValue jv && jv.TryGetValue<int>(out var ci) ? ColName(ci) : col.GetValue<string>();
+                                    var endCol = ColName(ColIndex(colName) + count - 1);
+                                    sheet.Columns[$"{colName}:{endCol}"].Insert();
+                                    exec.Affected.Add(new AffectedRef("cols", $"{sheet.Name}!{colName}:{endCol}"));
+                                    break;
+                                }
+                                case "format_range": ApplyFormat(wb, op, exec, opMismatches, ref checkedCells); break;
+                                case "find_replace": ApplyFindReplace(wb, op, exec, opMismatches, ref checkedCells); break;
+                                case "copy_sheet": ApplyCopySheet(targetApplication, wb, op, exec, opMismatches, ref checkedCells, interaction); break;
+                                case "merge_cells":
+                                case "unmerge_cells":
+                                    ApplyMergeOperation((object)wb, op, exec, opMismatches, ref checkedCells);
+                                    break;
+                                case "set_rows_hidden":
+                                case "set_cols_hidden":
+                                case "set_sheet_visibility":
+                                    ApplyVisibilityOperation((object)wb, op, exec, opMismatches, ref checkedCells);
+                                    break;
+                            }
+
+                            mismatches.AddRange(opMismatches);
+                            opWatch.Stop();
+                            exec.OperationResults.Add(BuildOperationResult(
+                                index, name, opMismatches.Count == 0, opWatch.ElapsedMilliseconds, "apply",
+                                error: null, opMismatches));
+                            if (opMismatches.Count > 0)
+                            {
+                                skipRemaining = true;
+                                exec.Ok = false;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            opWatch.Stop();
+                            skipRemaining = true;
+                            exec.Ok = false;
+                            exec.Errors.Add(ComFailure.FormatMessage(ex, "apply", name, index + 1));
+                            exec.OperationResults.Add(BuildOperationResult(
+                                index, name, false, opWatch.ElapsedMilliseconds, "apply", ex, null));
+                        }
+
+                        if (!skipRemaining && !interaction.Checkpoint(stopOnConcurrentInput: true))
+                        {
+                            skipRemaining = true;
+                            exec.Ok = false;
+                            exec.Errors.Add("[APP_USER_ACTIVITY_DETECTED] Excel이 작업 중 전경으로 전환되어 다음 작업을 중단했습니다");
+                        }
                     }
                 }
                 finally { try { targetApplication.ScreenUpdating = true; } catch { } }
 
                 exec.Readback = new JsonObject
                 {
-                    ["verified"] = mismatches.Count == 0,
+                    ["verified"] = mismatches.Count == 0 && exec.Errors.Count == 0,
                     ["checked"] = checkedCells,
                     ["mismatches"] = Json.ToArray(mismatches),
                     ["snapshotId"] = snapshotId,
                 };
-                exec.Ok = mismatches.Count == 0;
+                if (mismatches.Count > 0)
+                {
+                    exec.Ok = false;
+                    if (exec.Errors.Count == 0)
+                        exec.Errors.AddRange(mismatches);
+                }
+                else if (exec.Errors.Count > 0)
+                {
+                    exec.Ok = false;
+                }
             }
             catch (Exception ex)
             {
                 exec.Ok = false;
-                exec.Errors.Add($"apply failed: {ex.Message}");
+                exec.Errors.Add(ComFailure.FormatMessage(ex, "apply", "batch", 0));
             }
             finally
             {
@@ -1609,72 +1645,6 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             if (Math.Abs(expectedWidth - actualWidth) > 0.01)
                 mismatches.Add($"{copiedSheet.Name}: column {col} width mismatch ({expectedWidth} != {actualWidth})");
         }
-    }
-
-    private static void ApplyFormat(dynamic wb, JsonObject op, ApplyExecution exec,
-        List<string> mismatches, ref int checkedCells)
-    {
-        var resolvedRange = ResolveRangeTarget(
-            (object)wb,
-            Json.GetString(Json.GetObj(op, "target"), "sheet"),
-            Json.GetString(op, "range")!,
-            requireExplicitSheet: true);
-        dynamic sheet = resolvedRange.Sheet;
-        var rangeAddr = resolvedRange.Address;
-        dynamic range = sheet.Range(rangeAddr);
-        var style = Json.GetObj(op, "style") ?? new JsonObject();
-
-        if (style.TryGetPropertyValue("bold", out var b)) range.Font.Bold = b!.GetValue<bool>();
-        if (style.TryGetPropertyValue("italic", out var it)) range.Font.Italic = it!.GetValue<bool>();
-        if (style.TryGetPropertyValue("fontSize", out var fs)) range.Font.Size = fs!.GetValue<double>();
-        if (style.TryGetPropertyValue("numberFormat", out var nf)) range.NumberFormat = nf!.GetValue<string>();
-        if (style.TryGetPropertyValue("fontColor", out var fc) && fc is not null)
-            range.Font.Color = ParseColor(fc);
-        if (style.TryGetPropertyValue("fillColor", out var fill) && fill is not null)
-            range.Interior.Color = ParseColor(fill);
-
-        exec.Affected.Add(new AffectedRef("range", $"{sheet.Name}!{rangeAddr}"));
-
-        // 적용한 각 속성을 즉시 다시 읽어 성공 여부를 확인한다.
-        foreach (var (key, node) in style)
-        {
-            if (node is null) continue;
-            checkedCells++;
-            try
-            {
-                var matched = key switch
-                {
-                    "bold" => Convert.ToBoolean(range.Font.Bold, CultureInfo.InvariantCulture) == node.GetValue<bool>(),
-                    "italic" => Convert.ToBoolean(range.Font.Italic, CultureInfo.InvariantCulture) == node.GetValue<bool>(),
-                    "fontSize" => Math.Abs(Convert.ToDouble(range.Font.Size, CultureInfo.InvariantCulture) - node.GetValue<double>()) < 1e-9,
-                    "numberFormat" => string.Equals(Convert.ToString(range.NumberFormat, CultureInfo.InvariantCulture), node.GetValue<string>(), StringComparison.Ordinal),
-                    "fontColor" => Math.Abs(Convert.ToDouble(range.Font.Color, CultureInfo.InvariantCulture) - ParseColor(node)) < 1e-9,
-                    "fillColor" => Math.Abs(Convert.ToDouble(range.Interior.Color, CultureInfo.InvariantCulture) - ParseColor(node)) < 1e-9,
-                    _ => false,
-                };
-                if (!matched) mismatches.Add($"{sheet.Name}!{rangeAddr}: style '{key}' readback mismatch");
-            }
-            catch (Exception ex)
-            {
-                mismatches.Add($"{sheet.Name}!{rangeAddr}: style '{key}' readback failed: {ex.Message}");
-            }
-        }
-    }
-
-    private static double ParseColor(JsonNode node)
-    {
-        if (node is JsonValue jv)
-        {
-            if (jv.TryGetValue<int>(out var ole)) return ole;
-            if (jv.TryGetValue<string>(out var hex) && hex.StartsWith('#') && hex.Length == 7)
-            {
-                var r = Convert.ToInt32(hex[1..3], 16);
-                var g = Convert.ToInt32(hex[3..5], 16);
-                var b = Convert.ToInt32(hex[5..7], 16);
-                return r | (g << 8) | (b << 16); // OLE COLORREF (BGR 순서 아님: RGB 패킹)
-            }
-        }
-        throw new ArgumentException("color must be OLE int or '#RRGGBB'");
     }
 
     private static void ApplyFindReplace(dynamic wb, JsonObject op, ApplyExecution exec,
@@ -2084,6 +2054,20 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                 return;
             }
 
+            if (IsFormatOnlySnapshot(ops))
+            {
+                var formatState = CaptureFormatOnlyState(
+                    (object)wb,
+                    ops ?? throw new InvalidOperationException("format_range snapshot operations are missing"),
+                    fullName);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), formatState.ToJsonString(Json.Pretty));
+                metadata["payload"] = "format-only state.json";
+                metadata["documentRef"] = fullName;
+                metadata["formatFingerprint"] = Json.GetString(formatState, "fingerprint");
+                metadata["restoreMode"] = FormatOnlyRestoreMode;
+                return;
+            }
+
             // 2) 시트 값 state.json (범위 상한 적용)
             var sheets = new JsonObject();
             foreach (dynamic s in wb.Worksheets)
@@ -2172,6 +2156,18 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             var app = AttachExcel();
             if (app is null) return Json.ErrorResult("Excel not running", App);
             dynamic d = app;
+            var state = JsonNode.Parse(File.ReadAllText(statePath)) as JsonObject ?? new JsonObject();
+            var restoreMode = Json.GetString(state, "restoreMode");
+            if (string.Equals(restoreMode, FormatOnlyRestoreMode, StringComparison.Ordinal))
+            {
+                var documentRef = Json.GetString(state, "documentRef") ?? Json.GetString(metadata, "documentRef");
+                var capturedOps = new List<JsonObject>();
+                foreach (var node in Json.GetArr(state, "ops") ?? new JsonArray())
+                    if (node is JsonObject op) capturedOps.Add(op);
+                using var lease = ResolveSnapshotWorkbook((object)app, documentRef, capturedOps, allowFileOpen: false);
+                return RestoreFormatOnlyState(lease.Workbook, state);
+            }
+
             dynamic wb;
             try { wb = RequireWorkbook(d); }
             catch (Exception ex) { return Json.ErrorResult(ex.Message, App); }
@@ -2183,14 +2179,12 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                     $"active workbook '{(string)wb.FullName}' does not match snapshot document '{docRef}'. " +
                     "스냅샷 시점의 workbook을 먼저 여세요.", App);
 
-            var state = JsonNode.Parse(File.ReadAllText(statePath)) as JsonObject ?? new JsonObject();
             var stateDocumentRef = Json.GetString(state, "documentRef");
             if (!string.IsNullOrEmpty(stateDocumentRef) &&
                 !string.Equals((string)wb.FullName, stateDocumentRef, StringComparison.OrdinalIgnoreCase))
                 return Json.ErrorResult(
                     $"active workbook '{(string)wb.FullName}' does not match snapshot state document '{stateDocumentRef}'. " +
                     "스냅샷 시점의 workbook을 먼저 여세요.", App);
-            var restoreMode = Json.GetString(state, "restoreMode");
             if (string.Equals(restoreMode, CopySheetTopologyRestoreMode, StringComparison.Ordinal))
             {
                 if (Json.GetInt(state, "snapshotVersion") != CurrentExcelSnapshotVersion)

@@ -30,15 +30,20 @@ public sealed class JsonRpcDispatcher
     };
 
     private const string Instructions =
-        "doc-bridge는 실행 중인 Excel/한글(HWP)/AutoCAD 문서를 읽고 쓴다. " +
-        "앱별 작업 전 core_get_status를 먼저 호출한다. Excel은 apps.excel.connected=true이고 document가 비어 있지 않을 때만 excel_get_active_context를 한 번 호출한다. " +
+        "doc-bridge는 실행 중인 Excel/한글(HWP)/AutoCAD/GstarCAD 문서를 읽고 쓴다. " +
+        "cad_* 도구는 AutoCAD 전용이고 gstarcad_* 도구는 GstarCAD 전용이다. 두 제품을 대체 연결하지 말고 각각 core_get_capabilities로 지원 범위를 확인한다. " +
+        "앱별 작업 전 core_get_status를 먼저 호출한다. 한 앱만 다룰 때는 core_get_status({\"app\":\"excel\"})처럼 app 필터를 쓴다. 생략하면 기존처럼 전체 앱을 조회한다. " +
+        "Excel은 apps.excel.connected=true이고 document가 비어 있지 않을 때만 excel_get_active_context를 한 번 호출한다. " +
         "Excel이 닫혔거나 workbook이 없으면 context를 실행 probe로 호출하거나 같은 실패를 반복하지 않는다. " +
         "DocBridge 오류나 제약을 openpyxl 파일 덮어쓰기, pywin32/직접 Excel COM, PowerShell Excel COM, Start-Process/쉘/UI 자동화로 우회하지 말고 오류와 필요한 사용자 조치를 그대로 보고한다. " +
         "allowOpenFile은 기본 false이며, 사용자가 닫힌 기존 파일을 열어 읽으라고 명시하고 절대 workbook 경로를 제공한 경우에만 true로 쓸 수 있다. 쓰기에는 사용할 수 없다. " +
-        "쓰기(*_apply_ops)는 반드시 dryRun=true로 먼저 호출해 diff와 confirmToken을 받고, " +
-        "사용자에게 diff를 보여 승인받은 뒤 같은 ops를 dryRun=false + confirmToken으로 재호출한다. " +
+        "범위가 명확한 일반 편집(앱별 autoExecuteOps)은 executionMode=execute와 UUID requestId, expectedDocumentRef로 한 번에 적용한다. dryRun/confirmToken/highRiskConfirm과 함께 쓰지 않는다. " +
+        "Excel/CAD/GstarCAD execute의 expectedDocumentRef는 절대 경로이거나 어댑터가 준 인스턴스 바인딩 참조여야 한다. Book1/Drawing1 같은 미저장 이름은 인스턴스 간에 모호하므로 문서를 저장해 경로를 만들지 않고 dryRun+confirmToken을 쓴다. HWP는 hwp:PID:documentId와 untitled-PID-id를 허용한다. " +
+        "관련 앱 status → 필요한 범위 read → execute → 응답 readback을 쓰고, 필요한 시각 검증만 추가한다. 무조건 ping/전체 status/context/read/외부 미리보기/재승인/재조회를 반복하지 않는다. " +
+        "미리보기, 고위험, 구조 변경·삭제·저장·내보내기·문서 전환은 기존처럼 dryRun=true로 diff와 confirmToken을 받은 뒤 같은 ops를 dryRun=false + confirmToken으로 재호출한다. " +
         "confirmToken은 5분 TTL·1회용이며 ops 내용에 바인딩되어 있어 ops를 바꾸면 무효가 된다. " +
-        "delete_entities/run_script_template 같은 고위험 op는 highRiskConfirm=true가 추가로 필요하다. " +
+        "delete_entities/run_script_template 같은 고위험 op는 기존 dry-run 경로가 필요하다. highRiskConfirm은 클라이언트 권한 UI를 대체하거나 사람 승인을 증명하지 않는다. " +
+        "CAD/GstarCAD execute는 set_text_value, set_layer_visibility, set_layer_color, regen_document만 허용한다. 이동/그리기/복사/줌은 복원 범위가 레이어·텍스트 일부라서 execute로 열지 않는다. " +
         "Excel 쓰기는 활성 시트를 추정하지 말고 각 시트 범위 op에 target.sheet 또는 '시트 이름'!A1 형식의 range를 사용한다. " +
         "한글(HWP)은 hwp_get_active_context.summary.openDocuments로 모든 표시 창과 탭을 확인한다. " +
         "여러 문서 중 하나를 읽거나 편집할 때는 반환된 documentRef를 사용하고, 디스크 파일 작업만 file 절대 경로를 사용한다.";
@@ -123,7 +128,7 @@ public sealed class JsonRpcDispatcher
             ["serverInfo"] = new JsonObject
             {
                 ["name"] = "doc-bridge",
-                ["title"] = "doc-bridge (Excel / 한글 / AutoCAD)",
+                ["title"] = "doc-bridge (Excel / 한글 / AutoCAD / GstarCAD)",
                 ["version"] = _serverVersion,
             },
             ["instructions"] = Instructions + InteractionInstructions,

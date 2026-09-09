@@ -70,6 +70,19 @@ public sealed class PolicyEngine
         return OpClass.Unknown;
     }
 
+    /// <summary>
+    /// Direct execute is only for policy-allowed ordinary ops on the explicit autoExecute list.
+    /// High-risk, forbidden, and unknown ops can never be auto-executed, even if listed by mistake.
+    /// </summary>
+    public bool IsAutoExecutable(string app, string op) =>
+        ClassifyOp(app, op) == OpClass.Allowed && Set(AppPolicy(app), "autoExecuteOps").Contains(op);
+
+    public IReadOnlyList<string> AutoExecuteOps(string app) =>
+        Set(AppPolicy(app), "autoExecuteOps")
+            .Where(op => ClassifyOp(app, op) == OpClass.Allowed)
+            .OrderBy(op => op, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
     public bool IsToolHighRisk(string tool)
     {
         if (Json.GetArr(_policy, "highRiskTools") is { } arr)

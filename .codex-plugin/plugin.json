@@ -1,7 +1,7 @@
 {
   "name": "doc-bridge",
-  "version": "0.4.19+codex.20260903072936",
-  "description": "Control local Microsoft Excel, Hancom HWP, and AutoCAD through a safety-gated MCP server.",
+  "version": "0.4.20+codex.20260909054421",
+  "description": "Control local Microsoft Excel, Hancom HWP, AutoCAD and GstarCAD through a safety-gated MCP server.",
   "author": {
     "name": "DocBridge Local"
   },
@@ -9,6 +9,7 @@
     "excel",
     "hwp",
     "autocad",
+    "gstarcad",
     "mcp",
     "windows-automation"
   ],
@@ -24,8 +25,8 @@
   },
   "interface": {
     "displayName": "DocBridge",
-    "shortDescription": "Excel\u00b7\ud55c\uae00\u00b7AutoCAD \ub85c\uceec \ubb38\uc11c \uc790\ub3d9\ud654",
-    "longDescription": "Connects directly to open Excel, Hancom HWP, and AutoCAD windows, with file-based fallback. Every edit uses dry-run, full snapshot, confirmation token, and readback verification.",
+    "shortDescription": "Excel\u00b7\ud55c\uae00\u00b7AutoCAD\u00b7GstarCAD \ub85c\uceec \ubb38\uc11c \uc790\ub3d9\ud654",
+    "longDescription": "Connects directly to open Excel, Hancom HWP, AutoCAD and GstarCAD windows. AutoCAD and GstarCAD use separate tools and confirmation scopes. Allowlisted ordinary edits apply in one execute call with snapshot and readback. Preview and high-risk edits still use dry-run, snapshot, confirmation token, and readback.",
     "developerName": "DocBridge Local",
     "category": "Productivity",
     "capabilities": [

@@ -31,16 +31,45 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
     private const int MaxDrawEntities = 1000;
     private const int MaxContextLayers = 50;
     private readonly Func<object?>? _appFactory;
+    private readonly CadProduct _product;
     private object? _attached;
+    private string ProductName => _product == CadProduct.GstarCad ? "GstarCAD" : "AutoCAD";
+    private string ProgId => _product == CadProduct.GstarCad ? "Gcad.Application" : "AutoCAD.Application";
 
-    public CadAdapter(Func<object?>? appFactory = null) : base("cad", "AutoCAD.Application")
+    public CadAdapter(Func<object?>? appFactory = null, CadProduct product = CadProduct.AutoCad)
+        : base(product == CadProduct.GstarCad ? "gstarcad" : "cad",
+            product == CadProduct.GstarCad ? "Gcad.Application" : "AutoCAD.Application")
     {
         _appFactory = appFactory;
+        _product = product;
     }
 
-    private object? AttachCad() => _attached ??= _appFactory is not null
-        ? _appFactory()
-        : RotHelper.GetActiveObject("AutoCAD.Application");
+    private object? AttachCad()
+    {
+        if (_attached is not null && System.Runtime.InteropServices.Marshal.IsComObject(_attached))
+        {
+            try { _ = ((dynamic)_attached).Version; }
+            catch (Exception ex) when (IsComDisconnected(ex)) { ReleaseCadReference(); }
+            // Busy/modal servers are not disconnected and must not cause a second instance.
+        }
+        return _attached ??= _appFactory is not null ? _appFactory() : RotHelper.GetActiveObject(ProgId);
+    }
+
+    private void ReleaseCadReference()
+    {
+        var reference = _attached;
+        _attached = null;
+        // Only release this adapter's acquisition. Never Quit or invalidate another owner's RCW.
+        if (reference is not null && System.Runtime.InteropServices.Marshal.IsComObject(reference))
+            try { System.Runtime.InteropServices.Marshal.ReleaseComObject(reference); } catch { }
+    }
+
+    public override void Dispose()
+    {
+        try { RunOnAdapterThread(() => { ReleaseCadReference(); return true; }); }
+        catch (ObjectDisposedException) { }
+        finally { base.Dispose(); }
+    }
 
     /// <summary>
     /// Launch AutoCAD through COM when needed, make its main window visible, and
@@ -60,13 +89,13 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
             var launched = false;
             if (app is null)
             {
-                var type = Type.GetTypeFromProgID("AutoCAD.Application");
+                var type = Type.GetTypeFromProgID(ProgId);
                 if (type is null)
-                    return Json.ErrorResult("AutoCAD.Application COM registration was not found", App);
+                    return Json.ErrorResult($"{ProgId} COM registration was not found", App);
 
                 app = Activator.CreateInstance(type);
                 if (app is null)
-                    return Json.ErrorResult("AutoCAD.Application could not be created", App);
+                    return Json.ErrorResult($"{ProgId} could not be created", App);
                 _attached = app;
                 launched = true;
             }
@@ -81,9 +110,11 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
             var createdDrawing = false;
             if (doc is null)
             {
-                var template = Json.GetString(args, "template") ?? "acad.dwt";
-                if (template is not ("acad.dwt" or "acadiso.dwt"))
-                    return Json.ErrorResult("template must be 'acad.dwt' or 'acadiso.dwt'", App);
+                var templates = _product == CadProduct.GstarCad
+                    ? new[] { "gcad.dwt", "gcadiso.dwt" } : new[] { "acad.dwt", "acadiso.dwt" };
+                var template = Json.GetString(args, "template") ?? templates[0];
+                if (!templates.Contains(template, StringComparer.OrdinalIgnoreCase))
+                    return Json.ErrorResult($"template must be {string.Join(" or ", templates)}", App);
 
                 doc = d.Documents.Add(template);
                 createdDrawing = true;
@@ -245,6 +276,8 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
         try { item["startPoint"] = PointJson((object?)ent.StartPoint); } catch { }
         try { item["endPoint"] = PointJson((object?)ent.EndPoint); } catch { }
         try { item["center"] = PointJson((object?)ent.Center); } catch { }
+        if (type is "AcDbCircle" or "AcDbArc")
+            try { item["radius"] = (double)ent.Radius; } catch { }
         try { item["coordinates"] = PointJson((object?)ent.Coordinates); } catch { }
         try { item["rotation"] = (double)ent.Rotation; } catch { }
         try { item["height"] = (double)ent.Height; } catch { }
@@ -1836,10 +1869,15 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
 
     // ---------- IAppAdapter ----------
 
-    public override JsonObject GetCapabilities() => new()
+    public override JsonObject GetCapabilities()
+    {
+        var result = new JsonObject
     {
         ["app"] = App,
-        ["automation"] = "autocad-activex-com",
+        ["automation"] = _product == CadProduct.GstarCad ? "gstarcad-activex-com" : "autocad-activex-com",
+        ["product"] = ProductName,
+        ["progId"] = ProgId,
+        ["crossProductFallback"] = false,
         ["directAppControl"] = true,
         ["connectsToExistingWindow"] = true,
         ["usesUiAutomation"] = false,
@@ -1875,7 +1913,20 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
             ["queryContinuation"] = true,
         },
         ["safety"] = new JsonArray("dry-run", "snapshot", "confirm-token", "readback", "automatic-rollback"),
-    };
+        };
+        if (_product == CadProduct.GstarCad)
+        {
+            result["writeOps"] = Json.ToArray(GstarWriteOps);
+            result["drawEntityTypes"] = Json.ToArray(GstarDrawTypes);
+            result["compatibility"] = new JsonObject
+            {
+                ["stage"] = "basic-activex",
+                ["unsupported"] = new JsonArray("cross-document-copy", "hatch", "block-insertion", "xref", "layout-edit", "pdf-plot", "script-template", "rgb-color"),
+                ["note"] = "AutoCAD 전용 interop/명령은 GstarCAD로 전달하지 않습니다. ACI 색상을 사용하세요.",
+            };
+        }
+        return result;
+    }
 
     public override AdapterStatus GetStatus()
     {
@@ -1885,16 +1936,22 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
             {
                 var app = AttachCad();
                 if (app is null)
-                    return new AdapterStatus(false, false, "cad", null, null,
-                        "AutoCAD 실행 인스턴스를 찾지 못했고 새 인스턴스 생성도 실패했습니다 (DXF fallback은 file 인자로 분석 가능)");
+                    return new AdapterStatus(Type.GetTypeFromProgID(ProgId) is not null, false, App, null, null,
+                        $"실행 중인 {ProductName} 인스턴스를 찾지 못했습니다. 상태 조회는 새 창을 만들지 않습니다.");
                 dynamic d = app;
                 string? version = null; string? doc = null;
-                try { version = (string)d.Version; } catch { }
-                try { doc = (string?)ActiveDocWait(d)?.FullName; } catch { }
-                return new AdapterStatus(true, true, "cad", version, doc, null);
-            });
+                version = (string)d.Version;
+                var active = ActiveDoc(d);
+                if (active is not null) doc = CadDocumentIdentity(active);
+                return new AdapterStatus(true, true, App, version, doc,
+                    $"실행 중인 {ProductName} 창에 연결됨 ({ProgId})");
+            }, maxAttempts: 3, delayMs: 150);
         }
-        catch (Exception ex) { return new AdapterStatus(false, false, "cad", null, null, ex.Message); }
+        catch (Exception ex)
+        {
+            if (IsComDisconnected(ex)) RunOnAdapterThread(() => { ReleaseCadReference(); return true; });
+            return new AdapterStatus(true, false, App, null, null, $"{ProductName} 연결 확인 실패: {ex.Message}");
+        }
     }
 
     public override ContextResult GetActiveContext() => GetActiveContext(new JsonObject());
@@ -1922,7 +1979,7 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
             {
                 var app = AttachCad();
                 if (app is not null) TrackCadInteraction(app, foreground, state: null);
-                if (app is null) { r.Errors.Add("AutoCAD가 실행 중이지 않습니다. DXF 분석은 cad_query_entities의 file 인자를 사용하세요."); return r; }
+                if (app is null) { r.Errors.Add($"{ProductName}가 실행 중이지 않습니다. DXF 분석은 {App}_query_entities의 file 인자를 사용하세요."); return r; }
                 dynamic d = app;
                 var doc = ActiveDocWait(d);
                 if (doc is null) { r.Errors.Add("열린 도면이 없습니다."); return r; }
@@ -1934,6 +1991,8 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                 r.Summary["drawing"] = (string)doc.Name;
                 r.Summary["fullName"] = fullName;
                 r.Summary["detailLevel"] = detailLevel;
+                r.Summary["product"] = ProductName;
+                r.Summary["progId"] = ProgId;
 
                 var openDocuments = new JsonArray();
                 foreach (dynamic openDoc in d.Documents)
@@ -1976,7 +2035,7 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                 r.Summary["layerSummaryStatus"] = detailLevel == "basic" ? "omitted" :
                     layerCount > layers.Count ? "sampled" : "complete";
                 if (detailLevel == "summary" && layerCount > layers.Count)
-                    r.Warnings.Add($"활성 컨텍스트는 레이어 {layers.Count}/{layerCount}개만 반환했습니다. 전체 목록은 cad_query_entities(scope=layers)를 사용하세요.");
+                    r.Warnings.Add($"활성 컨텍스트는 레이어 {layers.Count}/{layerCount}개만 반환했습니다. 전체 목록은 {App}_query_entities(scope=layers)를 사용하세요.");
 
                 var counts = new JsonObject();
                 var countMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -2036,7 +2095,7 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
         });
     }
 
-    private static JsonArray BuildContextNextActions(
+    private JsonArray BuildContextNextActions(
         string documentRef, bool includeLayerQuery, bool includeEntityQuery)
     {
         var actions = new JsonArray();
@@ -2044,7 +2103,7 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
         {
             actions.Add(new JsonObject
             {
-                ["tool"] = "cad_query_entities",
+                ["tool"] = $"{App}_query_entities",
                 ["reason"] = "전체 레이어 목록을 페이지 단위로 조회",
                 ["arguments"] = new JsonObject
                 {
@@ -2059,7 +2118,7 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
         {
             actions.Add(new JsonObject
             {
-                ["tool"] = "cad_query_entities",
+                ["tool"] = $"{App}_query_entities",
                 ["reason"] = "대형 도면은 전체 순차 표본 대신 도곽/작업 영역별로 조회",
                 ["arguments"] = new JsonObject
                 {
@@ -2070,8 +2129,8 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
             });
             actions.Add(new JsonObject
             {
-                ["tool"] = "cad_query_entities",
-                ["reason"] = "한 영역의 실제 엔티티가 필요하면 AutoCAD 네이티브 공간 선택 사용",
+                ["tool"] = $"{App}_query_entities",
+                ["reason"] = $"한 영역의 실제 엔티티가 필요하면 {ProductName} 네이티브 공간 선택 사용",
                 ["arguments"] = new JsonObject
                 {
                     ["scope"] = "window",
@@ -2085,12 +2144,12 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
         return actions;
     }
 
-    private static JsonObject CadQueryAction(
+    private JsonObject CadQueryAction(
         string reason, JsonObject arguments, params string[] requiredArguments)
     {
         var action = new JsonObject
         {
-            ["tool"] = "cad_query_entities",
+            ["tool"] = $"{App}_query_entities",
             ["reason"] = reason,
             ["arguments"] = arguments,
         };
@@ -2120,7 +2179,12 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
         if (!string.IsNullOrEmpty(file) && Path.GetExtension(file).Equals(".dxf", StringComparison.OrdinalIgnoreCase))
         {
             var st = GetStatus();
-            if (!st.Available) return DxfReader.Analyze(file);
+            if (!st.Connected)
+            {
+                var analysis = DxfReader.Analyze(file);
+                analysis["app"] = App;
+                return analysis;
+            }
         }
 
         return ComInvokeWithRetry(() =>
@@ -2132,7 +2196,7 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
             try
             {
                 var app = AttachCad();
-                if (app is null) return Json.ErrorResult("AutoCAD not running. use 'file' arg for DXF fallback analysis.", App);
+                if (app is null) return Json.ErrorResult($"{ProductName} not running. use 'file' arg for DXF fallback analysis.", App);
                 TrackCadInteraction(app, foreground, documentState);
                 dynamic d = app;
                 var documentSelector = Json.GetString(args, "document");
@@ -2283,6 +2347,13 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
 
     public override ApplyPreview Preview(IReadOnlyList<JsonObject> ops)
     {
+        var validation = ValidateProductOperations(ops);
+        if (validation.Count > 0)
+        {
+            var denied = new ApplyPreview();
+            denied.Errors.AddRange(validation);
+            return denied;
+        }
         return ComInvokeWithRetry(() =>
         {
             var p = new ApplyPreview();
@@ -2291,7 +2362,7 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
             try
             {
                 var app = AttachCad();
-                if (app is null) { p.Errors.Add("AutoCAD not running"); return p; }
+                if (app is null) { p.Errors.Add($"{ProductName} not running"); return p; }
                 TrackCadInteraction(app, foreground, documentState);
                 dynamic d = app;
                 var doc = ActiveDocWait(d);
@@ -2303,6 +2374,11 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                     switch (name)
                     {
                         case "regen_document":
+                            if (DenyMismatchedScopedDocument(doc, op) is { } regenDocError)
+                            {
+                                p.Errors.Add(regenDocError);
+                                break;
+                            }
                             p.Affected.Add(new AffectedRef("display", "Regen all viewports; geometry unchanged"));
                             break;
                         case "activate_document":
@@ -2324,6 +2400,11 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                         case "set_layer_visibility":
                         case "set_layer_color":
                         {
+                            if (DenyMismatchedScopedDocument(doc, op) is { } layerDocError)
+                            {
+                                p.Errors.Add(layerDocError);
+                                break;
+                            }
                             var layerName = Json.GetString(op, "layer")!;
                             dynamic layer;
                             try { layer = doc.Layers.Item(layerName); }
@@ -2346,6 +2427,12 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                         case "delete_entities":
                         case "set_text_value":
                         {
+                            if (name == "set_text_value" &&
+                                DenyMismatchedScopedDocument(doc, op) is { } textDocError)
+                            {
+                                p.Errors.Add(textDocError);
+                                break;
+                            }
                             var handles = new List<string>();
                             if (name == "set_text_value") handles.Add(Json.GetString(op, "handle")!);
                             else foreach (var hNode in Json.GetArr(op, "handles")!) handles.Add(hNode!.GetValue<string>());
@@ -2656,7 +2743,7 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                     }
                     if (!foreground.Checkpoint(stopOnConcurrentInput: true))
                     {
-                        p.Errors.Add("[APP_USER_ACTIVITY_DETECTED] 사용자가 AutoCAD 창을 조작하여 미리보기를 중단했습니다. 해당 창 작업을 마친 뒤 다시 실행하세요.");
+                        p.Errors.Add($"[APP_USER_ACTIVITY_DETECTED] 사용자가 {ProductName} 창을 조작하여 미리보기를 중단했습니다. 해당 창 작업을 마친 뒤 다시 실행하세요.");
                         break;
                     }
                 }
@@ -2707,6 +2794,13 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
 
     public override ApplyExecution Apply(IReadOnlyList<JsonObject> ops, string snapshotId)
     {
+        var validation = ValidateProductOperations(ops);
+        if (validation.Count > 0)
+        {
+            var denied = new ApplyExecution { Ok = false };
+            denied.Errors.AddRange(validation);
+            return denied;
+        }
         // A batch is not idempotent: retrying from the beginning can move/scale twice.
         return ComInvoke(() =>
         {
@@ -2720,7 +2814,7 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
             try
             {
                 var app = AttachCad();
-                if (app is null) { exec.Errors.Add("AutoCAD not running"); exec.Ok = false; return exec; }
+                if (app is null) { exec.Errors.Add($"{ProductName} not running"); exec.Ok = false; return exec; }
                 TrackCadInteraction(app, foreground, documentState);
                 dynamic d = app;
                 var doc = ActiveDocWait(d);
@@ -2740,6 +2834,8 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                       switch (name)
                       {
                         case "regen_document":
+                            if (DenyMismatchedScopedDocument(doc, op) is { } regenDocError)
+                                throw new InvalidOperationException(regenDocError);
                             exec.Affected.Add(new AffectedRef("display", "queued all-viewport regeneration"));
                             break;
                         case "activate_document":
@@ -2761,6 +2857,8 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                         }
                         case "set_layer_visibility":
                         {
+                            if (DenyMismatchedScopedDocument(doc, op) is { } layerOnDocError)
+                                throw new InvalidOperationException(layerOnDocError);
                             var layerName = Json.GetString(op, "layer")!;
                             var visible = Json.GetBool(op, "visible");
                             dynamic layer = doc.Layers.Item(layerName);
@@ -2772,6 +2870,8 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                         }
                         case "set_layer_color":
                         {
+                            if (DenyMismatchedScopedDocument(doc, op) is { } layerColorDocError)
+                                throw new InvalidOperationException(layerColorDocError);
                             var layerName = Json.GetString(op, "layer")!;
                             dynamic layer = doc.Layers.Item(layerName);
                             var colorNode = op["color"];
@@ -2820,6 +2920,8 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                         }
                         case "set_text_value":
                         {
+                            if (DenyMismatchedScopedDocument(doc, op) is { } textDocError)
+                                throw new InvalidOperationException(textDocError);
                             var handle = Json.GetString(op, "handle")!;
                             var text = Json.GetString(op, "text")!;
                             dynamic ent = doc.HandleToObject(handle);
@@ -3257,7 +3359,7 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                     if (!foreground.Checkpoint(stopOnConcurrentInput: true))
                     {
                         userActivityInterrupted = true;
-                        exec.Errors.Add("[APP_USER_ACTIVITY_DETECTED] 사용자가 AutoCAD 창을 조작하여 남은 작업을 안전하게 중단했습니다. 도면을 다시 읽은 뒤 이어서 실행하세요.");
+                        exec.Errors.Add($"[APP_USER_ACTIVITY_DETECTED] 사용자가 {ProductName} 창을 조작하여 남은 작업을 안전하게 중단했습니다. 도면을 다시 읽은 뒤 이어서 실행하세요.");
                         break;
                     }
                 }
@@ -3285,71 +3387,13 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
     }
 
     // ---------- snapshot / restore ----------
+    // Routing only. Operation-scoped capture/restore lives in CadAdapter.Snapshot.cs.
 
-    public override void CaptureSnapshot(string snapshotDir, JsonObject metadata, IReadOnlyList<JsonObject>? ops = null)
-    {
-        ComInvokeWithRetry(() =>
-        {
-            var app = AttachCad();
-            if (app is null) { metadata["payload"] = "none (autocad not running)"; return; }
-            dynamic d = app;
-            var doc = ActiveDocWait(d);
-            if (doc is null) { metadata["payload"] = "none (no drawing)"; return; }
+    public override void CaptureSnapshot(string snapshotDir, JsonObject metadata, IReadOnlyList<JsonObject>? ops = null) =>
+        CaptureOperationSnapshot(snapshotDir, metadata, ops);
 
-            string fullName = "";
-            try { fullName = (string)(doc.FullName ?? ""); } catch { }
-            var savedAtSnapshot = false;
-            try { savedAtSnapshot = (bool)doc.Saved; } catch { }
-            if (!string.IsNullOrEmpty(fullName) && File.Exists(fullName))
-            {
-                var dest = Path.Combine(snapshotDir, "drawing-backup" + Path.GetExtension(fullName));
-                try
-                {
-                    using var src = new FileStream(fullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                    using var dst = new FileStream(dest, FileMode.Create, FileAccess.Write);
-                    src.CopyTo(dst);
-                    metadata["drawingBackup"] = Path.GetFileName(dest);
-                    metadata["fileSha256"] = CadFileHash(dest);
-                }
-                catch (Exception ex) { metadata["drawingBackupError"] = ex.Message; }
-            }
-
-            var layers = new JsonObject();
-            foreach (dynamic layer in doc.Layers)
-            {
-                layers[(string)layer.Name] = new JsonObject
-                {
-                    ["on"] = (bool)layer.LayerOn,
-                    ["color"] = (int)layer.Color,
-                };
-            }
-            var texts = new JsonObject();
-            var tcount = 0;
-            foreach (dynamic ent in doc.ModelSpace)
-            {
-                var type = (string)ent.EntityName;
-                if (!IsTextLike(type)) continue;
-                try { texts[(string)ent.Handle] = TextOf(ent); } catch { }
-                if (++tcount >= 500) break;
-            }
-
-            File.WriteAllText(Path.Combine(snapshotDir, "state.json"),
-                new JsonObject
-                {
-                    ["fullName"] = fullName,
-                    ["layers"] = layers,
-                    ["texts"] = texts,
-                }.ToJsonString(Json.Pretty));
-            metadata["payload"] = "drawing-backup + state.json";
-            metadata["documentRef"] = string.IsNullOrEmpty(fullName) ? metadata["documentRef"] : fullName;
-            metadata["savedAtSnapshot"] = savedAtSnapshot;
-            if (ops is { Count: > 0 })
-            {
-                metadata["operationStateSha256"] = CadOperationStateHash(doc, ops);
-                metadata["operationStateVersion"] = 2;
-            }
-        });
-    }
+    public override JsonObject RestoreSnapshot(string snapshotDir, JsonObject metadata) =>
+        RestoreOperationSnapshot(snapshotDir, metadata);
 
     /// <summary>
     /// 저장 완료된 DWG는 전체 파일 SHA-256으로, 이미 dirty였던 열린 DWG는 작업 대상
@@ -3532,85 +3576,5 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
         }
 
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(state.ToString()))).ToLowerInvariant();
-    }
-
-    public override JsonObject RestoreSnapshot(string snapshotDir, JsonObject metadata)
-    {
-        return ComInvokeWithRetry(() =>
-        {
-            var statePath = Path.Combine(snapshotDir, "state.json");
-            if (!File.Exists(statePath)) return Json.ErrorResult("state.json not found in snapshot", App);
-
-            var app = AttachCad();
-            if (app is null) return Json.ErrorResult("AutoCAD not running", App);
-            dynamic d = app;
-            var doc = ActiveDocWait(d);
-            if (doc is null) return Json.ErrorResult("열린 도면이 없습니다", App);
-
-            var state = JsonNode.Parse(File.ReadAllText(statePath)) as JsonObject ?? new JsonObject();
-            var docRef = Json.GetString(state, "fullName");
-            if (!string.IsNullOrEmpty(docRef))
-            {
-                string cur = "";
-                try { cur = (string)(doc.FullName ?? ""); } catch { }
-                if (!string.IsNullOrEmpty(cur) && !string.Equals(cur, docRef, StringComparison.OrdinalIgnoreCase))
-                    return Json.ErrorResult($"현재 도면 '{cur}'가 스냅샷 도면 '{docRef}'와 다릅니다.", App);
-            }
-
-            var mismatches = new List<string>();
-            var checkedCount = 0;
-
-            // 레이어 상태 복원
-            if (Json.GetObj(state, "layers") is { } layers)
-                foreach (var (layerName, lNode) in layers)
-                {
-                    if (lNode is not JsonObject lo) continue;
-                    try
-                    {
-                        dynamic layer = doc.Layers.Item(layerName);
-                        var wantOn = Json.GetBool(lo, "on");
-                        var wantColor = Json.GetInt(lo, "color") ?? 7;
-                        layer.LayerOn = wantOn;
-                        layer.Color = wantColor;
-                        checkedCount++;
-                        if ((bool)layer.LayerOn != wantOn || (int)layer.Color != wantColor)
-                            mismatches.Add($"layer {layerName}: restore readback mismatch");
-                    }
-                    catch (Exception ex) { mismatches.Add($"layer {layerName}: {ex.Message}"); }
-                }
-
-            // 텍스트 값 복원
-            if (Json.GetObj(state, "texts") is { } texts)
-                foreach (var (handle, tNode) in texts)
-                {
-                    try
-                    {
-                        dynamic ent = doc.HandleToObject(handle);
-                        var want = tNode!.GetValue<string>();
-                        ent.TextString = want;
-                        checkedCount++;
-                        if (TextOf(ent) != want)
-                            mismatches.Add($"entity {handle}: restore readback mismatch");
-                    }
-                    catch (Exception ex) { mismatches.Add($"entity {handle}: {ex.Message}"); }
-                }
-
-            return new JsonObject
-            {
-                ["ok"] = mismatches.Count == 0,
-                ["restored"] = true,
-                ["readback"] = new JsonObject
-                {
-                    ["verified"] = mismatches.Count == 0,
-                    ["checked"] = checkedCount,
-                    ["mismatches"] = Json.ToArray(mismatches),
-                },
-                ["warnings"] = Json.ToArray(new[]
-                {
-                    "레이어 상태/텍스트 값만 복원됩니다. 이동/회전/삭제된 엔티티는 drawing-backup 파일로만 보존됩니다.",
-                }),
-                ["errors"] = Json.ToArray(mismatches),
-            };
-        });
     }
 }

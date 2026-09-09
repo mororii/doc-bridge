@@ -44,7 +44,10 @@ public static class ExcelOwnerWatchdog
         var hostName = Path.GetFileNameWithoutExtension(executable);
         if (!hostName.Equals("doc-bridge-mcp", StringComparison.OrdinalIgnoreCase) &&
             !hostName.Equals("doc-bridge-cli", StringComparison.OrdinalIgnoreCase))
+        {
+            Trace("start-skip", $"host={hostName} excelPid={excelProcessId} reason=unsupported-host");
             return null;
+        }
 
         var token = Guid.NewGuid().ToString("N");
         var readyName = $"Local\\DocBridge.ExcelWatchdog.Ready.{token}";
@@ -72,12 +75,14 @@ public static class ExcelOwnerWatchdog
             process = Process.Start(start);
             if (process is null || !ready.WaitOne(TimeSpan.FromSeconds(5)))
             {
+                Trace("start-fail", $"excelPid={excelProcessId} ready=false");
                 try { release.Set(); } catch { }
                 try { process?.WaitForExit(2000); } catch { }
                 process?.Dispose();
                 release.Dispose();
                 return null;
             }
+            Trace("start-ok", $"excelPid={excelProcessId} watchdogPid={process.Id} parentPid={Environment.ProcessId}");
             return new Lease(release, process);
         }
         catch
@@ -142,10 +147,12 @@ public static class ExcelOwnerWatchdog
             } while (DateTime.UtcNow < deadline);
             if (application is null)
             {
+                Trace("bind-fail", $"excelPid={excelProcessId} parentPid={parentProcessId}");
                 result = 3;
             }
             else
             {
+                Trace("bind-ok", $"excelPid={excelProcessId} parentPid={parentProcessId}");
                 ready?.Set();
                 var releasedNormally = false;
                 while (ParentIsAlive(parentProcessId))
@@ -160,14 +167,17 @@ public static class ExcelOwnerWatchdog
 
                 if (releasedNormally)
                 {
+                    Trace("released-normal", $"excelPid={excelProcessId}");
                     result = 0;
                 }
                 else
                 {
                     // Owner vanished without the normal release signal. Never suppress prompts
                     // and never close an unsaved workbook. A clean owned instance can exit.
+                    Trace("parent-gone", $"excelPid={excelProcessId} parentPid={parentProcessId}");
                     quitAttempted = TryQuitSafely(application);
                     result = quitAttempted ? 0 : 4;
+                    Trace(quitAttempted ? "quit-ok" : "quit-skip", $"excelPid={excelProcessId} result={result}");
                 }
             }
         }
@@ -183,8 +193,24 @@ public static class ExcelOwnerWatchdog
             GC.WaitForPendingFinalizers();
         }
         if (quitAttempted && !WaitForProcessExit(excelProcessId, TimeSpan.FromSeconds(15)))
+        {
+            Trace("exit", $"excelPid={excelProcessId} code=6 reason=process-still-running");
             return 6;
+        }
+        Trace("exit", $"excelPid={excelProcessId} code={result}");
         return result;
+    }
+
+    private static void Trace(string phase, string detail)
+    {
+        var path = Environment.GetEnvironmentVariable("DOCBRIDGE_EXCEL_WATCHDOG_LOG");
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try
+        {
+            File.AppendAllText(path,
+                $"{DateTime.UtcNow:o} phase={phase} {detail}{Environment.NewLine}");
+        }
+        catch { }
     }
 
     private static object? FindApplicationByProcessId(int processId)
@@ -224,7 +250,10 @@ public static class ExcelOwnerWatchdog
                 {
                     workbook = (object)((dynamic)workbooks).Item(index);
                     if (!Convert.ToBoolean(((dynamic)workbook).Saved, CultureInfo.InvariantCulture))
+                    {
+                        Trace("quit-skip", $"excelPid-unknown reason=unsaved-workbook index={index}");
                         return false;
+                    }
                 }
                 catch { return false; }
                 finally { RotHelper.ReleaseComObject(workbook); }

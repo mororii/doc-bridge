@@ -64,6 +64,26 @@ public class PolicyEngineTests : IClassFixture<TestHome>
     public void ClassifyOp_follows_policy(string app, string op, OpClass expected)
         => Assert.Equal(expected, _policy.ClassifyOp(app, op));
 
+    [Theory]
+    [InlineData("excel", "set_values", true)]
+    [InlineData("excel", "format_range", true)]
+    [InlineData("excel", "insert_rows", false)]
+    [InlineData("excel", "merge_cells", false)]
+    [InlineData("hwp", "append_text", true)]
+    [InlineData("hwp", "insert_table", false)]
+    [InlineData("hwp", "table_delete_rows", false)]
+    [InlineData("cad", "set_text_value", true)]
+    [InlineData("cad", "set_layer_visibility", true)]
+    [InlineData("cad", "regen_document", true)]
+    [InlineData("cad", "draw_entities", false)]
+    [InlineData("cad", "move_entities", false)]
+    [InlineData("cad", "zoom_window", false)]
+    [InlineData("cad", "copy_entities", false)]
+    [InlineData("gstarcad", "set_layer_color", true)]
+    [InlineData("gstarcad", "draw_entities", false)]
+    public void AutoExecute_follows_explicit_allowlist(string app, string op, bool expected)
+        => Assert.Equal(expected, _policy.IsAutoExecutable(app, op));
+
     [Fact]
     public void Restore_snapshot_is_high_risk_tool()
         => Assert.True(_policy.IsToolHighRisk("core_restore_snapshot"));
@@ -76,6 +96,37 @@ public class PolicyEngineTests : IClassFixture<TestHome>
 public class OperationValidatorTests
 {
     private readonly OperationValidator _v = new(new PolicyEngine());
+
+    [Fact]
+    public void Execute_batch_requires_uuid_and_document_and_allowlist()
+    {
+        var valid = Json.ParseObject($$"""
+        {
+          "ops": [ { "op": "set_values", "range": "Sheet1!A1", "values": [["x"]] } ],
+          "executionMode": "execute",
+          "requestId": "{{Guid.NewGuid():D}}",
+          "expectedDocumentRef": "C:\\\\docbridge-identity\\\\book.xlsx"
+        }
+        """);
+        var errors = new List<string>();
+        var parsed = _v.Validate(valid, "excel", errors);
+        Assert.NotNull(parsed);
+        Assert.Empty(errors);
+        Assert.Equal(OperationValidator.ExecutionModeExecute, parsed!.ExecutionMode);
+        Assert.False(parsed.DryRun);
+
+        var structural = Json.ParseObject($$"""
+        {
+          "ops": [ { "op": "insert_rows", "target": { "sheet": "Sheet1" }, "row": 1, "count": 1 } ],
+          "executionMode": "execute",
+          "requestId": "{{Guid.NewGuid():D}}",
+          "expectedDocumentRef": "C:\\\\docbridge-identity\\\\book.xlsx"
+        }
+        """);
+        var structuralErrors = new List<string>();
+        Assert.Null(_v.Validate(structural, "excel", structuralErrors));
+        Assert.Contains(structuralErrors, e => e.Contains("does not allow", StringComparison.OrdinalIgnoreCase));
+    }
 
     [Fact]
     public void Valid_batch_passes()
@@ -591,5 +642,62 @@ public class SnapshotServiceTests : IDisposable
         Assert.Null(svc.FindLatestReusableCandidate(
             "fake", "fake://doc", "different-ops",
             (expected, current) => string.Equals(expected, current, StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void Get_uses_a_direct_app_folder_path_and_rejects_unsafe_ids()
+    {
+        var svc = new SnapshotService(_home.Options);
+        SnapshotInfo? target = null;
+        for (var i = 0; i < 12; i++)
+        {
+            var info = svc.Create("fake", "bulk", $"fake://doc-{i}",
+                (dir, _) => File.WriteAllText(Path.Combine(dir, "state.json"), "{}"));
+            if (i == 3) target = info;
+        }
+
+        var other = svc.Create("excel", "other-app", "excel://doc",
+            (dir, _) => File.WriteAllText(Path.Combine(dir, "state.json"), "{}"));
+
+        var before = svc.MetadataFilesRead;
+        var got = svc.Get(target!.SnapshotId);
+        Assert.NotNull(got);
+        Assert.Equal(target.SnapshotId, got!.Value.Info.SnapshotId);
+        Assert.Equal(1, svc.MetadataFilesRead - before);
+
+        before = svc.MetadataFilesRead;
+        Assert.NotNull(svc.Get(other.SnapshotId));
+        Assert.Equal(1, svc.MetadataFilesRead - before);
+
+        Assert.Null(svc.Get("../secret"));
+        Assert.Null(svc.Get(".."));
+        Assert.Null(svc.Get("fake/../excel"));
+        Assert.False(SnapshotService.IsSafeSnapshotId(".."));
+        Assert.False(SnapshotService.IsSafeSnapshotId("a/b"));
+    }
+
+    [Fact]
+    public void Reusable_lookup_reads_at_most_the_search_window_of_newest_metadata()
+    {
+        var svc = new SnapshotService(_home.Options);
+        const string opsHash = "ops-window";
+        var preview = new ApplyPreview();
+        preview.Affected.Add(new AffectedRef("cell", "A1"));
+        for (var i = 0; i < 25; i++)
+        {
+            svc.Create("fake", "dry-run", "fake://doc", (dir, meta) =>
+            {
+                File.WriteAllText(Path.Combine(dir, "state.json"), "{}");
+                meta["snapshotReuseVersion"] = 1;
+                ApplyPreviewArtifact.StoreInMetadata(meta, "other-hash", preview);
+            });
+        }
+
+        var before = svc.MetadataFilesRead;
+        Assert.Null(svc.FindLatestReusableCandidate(
+            "fake", "fake://doc", opsHash,
+            (expected, current) => string.Equals(expected, current, StringComparison.Ordinal),
+            searchLimit: 20));
+        Assert.InRange(svc.MetadataFilesRead - before, 1, 20);
     }
 }

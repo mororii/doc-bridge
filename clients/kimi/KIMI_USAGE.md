@@ -45,7 +45,7 @@ kimi mcp list          # doc-bridge 가 보이는지
 kimi mcp test doc-bridge
 ```
 
-세션에서 `core_ping`을 호출해 `ok: true`와 `adapters: [excel, hwp, cad]`가 나오면 연결 완료다.
+세션에서 `core_get_status`로 연결을 확인하고, 한 앱만 다룰 때는 `app` 필터를 쓴다. 설치 직후 서버 생존 확인에만 `core_ping`을 쓴다.
 
 ### 사용
 
@@ -59,16 +59,30 @@ cad_get_active_context
 cad_query_entities {"entityType":"Text","limit":20}
 ```
 
-쓰기는 **반드시 두 번 호출**한다.
+일반 편집(`set_values`/`set_formulas`/`format_range` 등 앱별 `autoExecuteOps`)은 **한 번** 호출한다.
+
+```
+excel_apply_ops {
+  "ops":[...],
+  "executionMode":"execute",
+  "requestId":"<새 UUID>",
+  "expectedDocumentRef":"C:/path/file.xlsx"
+}
+→ 한 호출에서 사전검사·snapshot·apply·readback. dryRun/confirmToken/highRiskConfirm을 넣지 않는다.
+Excel/CAD/GstarCAD execute의 expectedDocumentRef는 저장된 절대 경로만 쓴다. 현재 어댑터는 인스턴스 바인딩 참조를 발급하지 않는다. CAD dirty 광범위 작업이나 저장 지문 불일치는 거절이며 자동 저장으로 우회하지 않는다.
+```
+
+`Book1`/`Drawing1`과 미리보기·고위험·병합/숨김/도형/삭제는 기존처럼 **두 번** 호출한다.
 
 ```
 1) excel_apply_ops {"ops":[...], "dryRun":true}
    → diff, snapshotId, confirmToken 반환. 문서는 아직 안 바뀐다.
-   → diff를 사용자에게 보여주고 승인을 받는다.
 
 2) excel_apply_ops {"ops":[...동일...], "dryRun":false, "confirmToken":"conf_..."}
    → 적용 후 readback.verified 확인
 ```
+
+원 요청이 이미 그 범위면 재승인 질문을 하지 않는다. `highRiskConfirm`은 권한 UI를 대체하지 않는다.
 
 ---
 
@@ -137,11 +151,11 @@ $cli = (Resolve-Path ".\dist\doc-bridge-cli.exe").Path
 
 ---
 
-## 4. 한글(HWP)은 파일 기반으로 작업한다
+## 4. 한글(HWP)은 반환된 문서 참조를 그대로 쓴다
 
-한글 COM 서버는 ROT에 등록되지 않고 COM 인스턴스가 헤드리스 전용이라,
-Excel/AutoCAD처럼 "열어둔 창에 연결"이 안 된다. 대신 op에 `"file"` 인자로 파일을 지정하면
-어댑터가 열기 → 수정 → 저장 → 닫기까지 수행한다.
+열린 창은 `hwp_get_active_context.summary.openDocuments`의 `documentRef`/`instanceRef`를
+읽기와 쓰기에 그대로 넣는다. 디스크 파일 작업만 모든 op에 같은 절대 `"file"`을 지정한다.
+`insert_text`는 execute가 아니다. `append_text` 등 현재 `autoExecuteOps`는 execute 경로를 쓴다.
 
 ```json
 [
@@ -160,14 +174,15 @@ Git Bash에서 CLI를 쓸 땐 JSON 안 경로를 `C:/path/...` 슬래시 형태�
 
 ## 5. 규칙 요약
 
-- `dryRun=false`는 confirmToken 없이 **항상 실패**한다.
+- execute는 `requestId` UUID와 `expectedDocumentRef`가 필수이고 `dryRun`/`confirmToken`/`highRiskConfirm`을 포함하면 거절된다. Excel/CAD/GstarCAD는 저장된 절대 경로만 쓰고 인스턴스 바인딩 참조를 쓰지 않는다. 한글은 반환된 `documentRef`/`instanceRef`를 그대로 쓴다. CAD dirty 광범위 작업이나 저장 지문 불일치는 거절이며 자동 저장으로 우회하지 않는다. 같은 UUID·앱·문서·ops는 저장된 결과를 재전송한다. `outcomeUnknown`이면 새 UUID로 재실행하지 말고 문서를 먼저 확인한다.
+- 토큰 경로에서 `dryRun=false`는 confirmToken 없이 **항상 실패**한다.
 - confirmToken은 5분 TTL, **1회용**, ops 내용에 바인딩된다 (ops를 바꾸면 무효).
-- 고위험 op(`delete_entities`, `run_script_template`)는 `highRiskConfirm=true`
-  (CLI는 `--high-risk-confirm`)가 추가로 필요하다.
+- 고위험 op(`delete_entities`, `run_script_template`, 한글 표 삭제/`export_pdf`)는 토큰 경로와 `highRiskConfirm=true`
+  (CLI는 `--high-risk-confirm`)가 추가로 필요하다. 이 플래그는 사람 승인을 증명하지 않는다.
 - `run_script_template`은 repo `ops/script-templates/*.scr`에 등록된 템플릿만 실행된다.
   임의 스크립트/매크로는 차단.
 - 모든 호출은 `%LOCALAPPDATA%\DocBridge\logs`에 JSONL로 기록된다.
 - 한글 find_replace는 내부적으로 `ps.IgnoreMessage = 1`을 설정한다 (모달 대화상자로 인한 자동화 정지 방지).
-- `hwp table_cell_set_text`는 미구현이라 allowlist에서 제거되어 정책 단계에서 거부된다.
+- `hwp table_cell_set_text`와 `table_set_cells`는 현재 write/autoExecute allowlist에 있다.
 - **AutoCAD(`acad.exe`)를 작업 관리자로 강제종료하지 말 것** — 라이센싱 구성요소가 손상되어
   이후 "라이센스 구성요소와 연결할 수 없습니다" 오류로 AutoCAD가 반복 종료될 수 있다.

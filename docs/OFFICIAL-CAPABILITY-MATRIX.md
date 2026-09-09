@@ -7,13 +7,13 @@ This matrix turns official beginner training topics and the official automation 
 - **Basic**: the operations a new user needs to create and edit a normal document/drawing.
 - **Production**: reusable formatting, annotation, blocks, layouts, exports, and structured reads.
 - **Workflow**: multi-step work such as formatted reports and longitudinal/profile sheet assembly.
-- **Reliability**: capability preflight, bounded queries, dry-run snapshot, confirmation, readback, automatic rollback, and timings.
+- **Reliability**: capability preflight, bounded queries, dry-run snapshot, confirmation, readback, best-effort rollback with a `verified` flag, and timings. Rollback is not guaranteed on protected sheets or other write-blocked COM states.
 
 ## Excel
 
 | Area | Official automation basis | Existing baseline | Target in this work |
 | --- | --- | --- | --- |
-| Connection/workbook | `Application`, ROT, `Workbooks`, `Workbook`, `Worksheets` | existing-instance-first connection, explicit workbook/sheet targeting, safe disconnect | retain user-owned Excel, clean up only DocBridge-owned instances, expose connection type and supported ops |
+| Connection/workbook | `Application`, ROT, `Workbooks`, `Workbook`, `Worksheets` | existing-instance-first connection, explicit workbook/sheet targeting, safe disconnect | retain user-owned Excel; clean up DocBridge-owned saved workbooks on normal disconnect/pipe EOF; crash leftovers remain observed; never force-kill user Excel |
 | Values/formulas | `Range.Value2`, `Range.Formula` | bounded range read, values/formulas, find/replace, formatting | preserve formulas and numeric COM types; keep explicit sheet identity and exact readback |
 | Cell structure | [`Range.Merge`](https://learn.microsoft.com/en-us/office/vba/api/excel.range.merge), [`Range.UnMerge`](https://learn.microsoft.com/en-us/office/vba/api/excel.range.unmerge), [`Range.MergeArea`](https://learn.microsoft.com/en-us/office/vba/api/excel.range.mergearea) | row/column insert and sheet copy | delivered: loss-blocking rectangular merge, bounded unmerge, operation-scoped merge snapshot and readback |
 | Visibility | [`Range.Hidden`](https://learn.microsoft.com/en-us/office/vba/api/excel.range.hidden), [`Worksheet.Visible`](https://learn.microsoft.com/en-us/office/vba/api/excel.worksheet.visible), [`XlSheetVisibility`](https://learn.microsoft.com/en-us/office/vba/api/excel.xlsheetvisibility) | sheet visibility was inspect-only | delivered: row/column hide and unhide, normal sheet hide/show, last-visible/active-sheet protection, exact mixed-state rollback |
@@ -58,14 +58,14 @@ Every write path must satisfy all of the following:
 2. Dry-run validates every operation and creates the full snapshot before returning a confirmation token.
 3. Apply is bound to the same operation hash and document identity.
 4. Each operation contributes an operation-level status and duration.
-5. Any failed batch triggers best-effort automatic restoration from its pre-apply snapshot; the result reports whether rollback was verified.
+5. A failed batch attempts best-effort restoration from its pre-apply snapshot. The result reports `rollback.verified`. A protected-sheet COM refusal (for example Bold) also blocks rollback writes; do not treat every failure as a verified restore.
 6. Reads are bounded. CAD scans accept start/end index and return a continuation index; expensive HWP pagination is opt-in.
 7. High-risk delete/script/overwrite/export actions remain policy-gated.
 
 ## Acceptance workflows
 
 - Excel basic: read values/formulas plus `includeLayout`, merge and unmerge a safe range, hide/show rows and columns, hide/show a non-active sheet, then verify exact layout readback and snapshot restoration.
-- Excel reliability: refuse content-losing merge, partial-overlap unmerge, active/last-visible sheet hiding and protected-structure changes; disconnect without leaving a DocBridge-owned `EXCEL.EXE` process.
+- Excel reliability: refuse content-losing merge, partial-overlap unmerge, active/last-visible sheet hiding and protected-structure changes; disconnect/pipe-clean owned saved workbooks on the normal path; report crash leftovers honestly; never force-kill user Excel.
 - HWP basic: create a document, insert/format paragraphs, configure page, insert/edit/merge a table, save and reopen, verify text and control inventory.
 - HWP production: build a styled daily plan with header/footer, page number, image and table; export PDF; verify text, controls and output existence.
 - CAD basic: create all supported entity types on controlled layers, modify them, read them back by handle/bounds/type, save and reopen.

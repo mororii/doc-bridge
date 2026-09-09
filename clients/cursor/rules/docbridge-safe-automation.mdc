@@ -1,14 +1,16 @@
 ---
-description: Safely edit Excel, HWP/HWPX, and AutoCAD documents through the DocBridge MCP approval workflow
+description: Safely edit Excel, HWP/HWPX, AutoCAD and GstarCAD documents through the DocBridge MCP approval workflow
 globs:
 alwaysApply: true
 ---
 
 # DocBridge safe automation
 
+- Product routing: `cad_*` is AutoCAD-only, `gstarcad_*` is GstarCAD-only. Never substitute one for the other. For GstarCAD, use `core_get_capabilities(app="gstarcad")` and the equivalent `gstarcad_*` context/read/apply tools in the CAD guidance below. Hatch, cross-document copy, block insertion, XREF, layout editing, PDF plot, scripts and RGB are not yet supported in GstarCAD; do not bypass these limits with AutoCAD or custom scripts.
+
 - Use only the `doc-bridge` MCP tools for Excel, HWP/HWPX, and AutoCAD automation. Do not replace them with GUI clicking, PowerShell/Python COM, VBA, AutoLISP, LSP, or generated fallback scripts.
 - If DocBridge tools are unavailable, stop before changing documents and ask the user to run `2-TEST.cmd`. Do not modify project files to simulate the missing tools.
-- Start with `core_ping` and `core_get_status`, then read the exact target document before proposing a write.
+- Start with `core_get_status` using an `app` filter when only one app is in scope, then read the needed range or document ref. Do not force ping, all-app status, repeated context, a full reread, or a separate approval question on every write.
 - Never let two AI clients or the user and an AI edit the same Excel workbook, HWP document, or DWG at the same time.
 
 ## Excel connection preflight
@@ -17,25 +19,28 @@ alwaysApply: true
 - If Excel is disconnected or `document` is empty, do not call `excel_get_active_context` as a probe and do not retry it in a loop. Retry only after a real state change and a fresh status response, such as the user opening a workbook.
 - `allowOpenFile` defaults to `false`. Set `allowOpenFile:true` with an absolute workbook path only when the user explicitly asks to read that closed file. Never use it for writes, infer it from a generic Excel request, or invent a path. If a write requires the workbook to be open, report that requirement instead of launching an empty Excel window.
 - If a DocBridge Excel call fails or reports a limitation, preserve and report the original DocBridge error, then stop. Never bypass it with `openpyxl`, `pywin32` or `DispatchEx("Excel.Application")`, PowerShell Excel COM, `Start-Process`, shell/UI automation, or repeated on-disk workbook overwrite. Resume only after a real state change or the user explicitly selects a supported DocBridge route.
-- After a path-only workflow, or when status detail is `DocBridge가 생성한 인스턴스`, verify that there are no unsaved changes and call `excel_disconnect`. Never quit a user-owned Excel instance; disconnect only releases DocBridge's reference to it.
+- After a path-only workflow, or when status detail is `DocBridge가 생성한 인스턴스`, verify that there are no unsaved changes and call `excel_disconnect`. Owned saved workbooks are cleaned up on normal disconnect/pipe EOF. Crash leftovers remain observed; do not claim leftover-free Excel. Never quit or force-kill a user-owned Excel instance; disconnect only releases DocBridge's reference to it.
 
-## Mandatory write sequence
+## Write paths
+
+The user's edit request authorizes that scope. Distinguish client permission UI, server preflight, and human scope approval. Do not ask for re-approval on every write. An already-requested save or PDF does not automatically require a new question. `highRiskConfirm` does not bypass client permission UI and does not prove a human approved.
 
 1. Read the exact target and capture its `documentRef` or equivalent identity.
-2. Call the relevant `*_apply_ops` with `dryRun=true`.
-3. Show the diff, affected range/object count, snapshot information, and `confirmToken` to the user. Wait for explicit approval.
-4. Apply with `dryRun=false`, the unmodified `ops`, and the token from that dry-run.
-5. Read the changed cells, text/table structure, or CAD entities back and verify the result. Do not claim completion from a successful tool call alone.
+2. For allowlisted ordinary edits, call `*_apply_ops` once with `executionMode=execute`, a new UUID `requestId`, and `expectedDocumentRef`. Do not include `dryRun`, `confirmToken`, or `highRiskConfirm` even as false. Excel: `set_values`, `set_formulas`, `format_range`. HWP: current `autoExecuteOps` (`insert_text` is not included). CAD/GstarCAD: `set_text_value`, `set_layer_visibility`, `set_layer_color`, `regen_document` only.
+3. Excel/CAD/GstarCAD execute requires a saved absolute path. The current adapters do not issue instance-bound refs. Bare `Book1`/`Drawing1` stay on the token path; do not auto-save to invent a path. A dirty CAD broad-operation or save fingerprint mismatch is denied; do not auto-save or bypass it. HWP uses the returned `documentRef`/`instanceRef` as-is.
+4. Preview, high-risk, merge/visibility, geometry, delete, save, and export stay on `dryRun=true` then the same `ops` plus `confirmToken`. Ask again only if the diff materially exceeds the request or the target is ambiguous.
+5. Trust the returned `readback`. Do not force a full reread. If `outcomeUnknown`, inspect the document before any new UUID.
 
-Never invent a token. A token is one-use, expires after five minutes, and is bound to the exact app, target, and ops. If the ops or target change, the token expires, or the document fingerprint changes, read again and create a new dry-run.
+Never invent a token. A token is one-use, expires after five minutes, and is bound to the exact app, target, and ops. Object key order must not change the binding. Numeric identity is lexical (`1`/`1.0`/`1e0` equal; `1e-100` is not `0`). If the ops or target change, the token expires, or a scoped format fingerprint no longer matches, read again and create a new dry-run. Mixed Excel batches do not get a universal workbook fingerprint; they require a fresh preview. Same UUID + app + document + ops replays the stored result; a different payload is denied.
 
 ## App-specific targeting
 
 - Excel writes must specify `target.sheet` or a quoted sheet-qualified range such as `'내역서'!B2`. Never infer the active sheet for a write. If both forms are present, they must name the same sheet. Before and after merge or visibility edits, call `excel_read_range` with `includeLayout=true` and inspect `mergedAreas`, row/column hidden states, sheet visibility, and `coverage.complete`.
+- `format_range` accepts `bold`/`fontBold`, `italic`/`fontItalic`, and `fillColor`/`interiorColor`/`fill`. Reject conflicting aliases, unknown keys, and invalid colors before snapshot. v3 snapshots capture written properties only; bold-only does not read or restore other colors or tints. Uniform bool/font size/NumberFormat may use a range fast path; mixed and color work must obtain the needed cell state and verify after restore. Legacy v2 format snapshots still restore. Dry-run before is the live style. `includeStyles` includes both alias families and `fillPattern`; no-fill is not `Color=0`. Refuse partial merges, mixed/rich-text Font or Interior, and non-theme RGB+nonzero tint (`EXCEL_FORMAT_UNSUPPORTED_RGB_TINT`). Theme-linked tint is allowed. After apply, require per-op HRESULT/`skipped` rather than empty `errors`. A protected-sheet Bold COM refusal also blocks rollback writes (`rollback.verified=false`); do not treat every failure as a verified restore. COM success is not a visual proof.
 - `merge_cells` and `unmerge_cells` must be the only op in their batch. Do not approve a merge when the dry-run reports content outside the upper-left cell, an overlapping merged area, or incomplete layout coverage.
 - Keep `set_rows_hidden`, `set_cols_hidden`, and `set_sheet_visibility` in a visibility-only batch. They may be combined with one another, but never with values, formulas, formatting, sheet copy, merge, or unmerge. Do not hide the active or last visible sheet, and do not request `veryHidden`.
 - HWP work starts with `hwp_get_active_context`. Select the requested item from `summary.openDocuments` and keep its `documentRef` or `instanceRef` through read, dry-run, apply, and readback. Do not mix `file` and `documentRef`, or multiple HWP documents, in one batch.
-- CAD work starts with `cad_get_active_context`. Preserve the drawing identity, layout, units, and coordinate basis. If `interaction.interrupted` or `userActivityDetected` is true, re-query the drawing and create a new dry-run for only the remaining work.
+- CAD/GstarCAD work starts with the matching status/context tools. Preserve the drawing identity, layout, units, and coordinate basis. Execute covers only text/layer/regen. Geometry/save/export/delete/activation stay on the token path. Dirty broad-operation or save fingerprint mismatches are denied; do not auto-save or bypass. A requested text-handle or layer-property snapshot can fully restore that scope; it is not a full-drawing restore. Geometry snapshots are a drawing-backup plus partial state and do not guarantee automatic restore. If `interaction.interrupted` or `userActivityDetected` is true, re-query the drawing and create a new execute or dry-run for only the remaining work.
 
 ## Large CAD drawings
 

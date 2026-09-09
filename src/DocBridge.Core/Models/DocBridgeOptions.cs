@@ -21,6 +21,7 @@ public sealed class DocBridgeOptions
     public string SnapshotsDir => Path.Combine(RootDir, "snapshots");
     public string TokensDir => Path.Combine(RootDir, "tokens");
     public string LogsDir => Path.Combine(RootDir, "logs");
+    public string ExecuteJournalsDir => Path.Combine(RootDir, "journals", "execute");
 
     public void EnsureDirectories()
     {
@@ -28,5 +29,6 @@ public sealed class DocBridgeOptions
         Directory.CreateDirectory(SnapshotsDir);
         Directory.CreateDirectory(TokensDir);
         Directory.CreateDirectory(LogsDir);
+        Directory.CreateDirectory(ExecuteJournalsDir);
     }
 }

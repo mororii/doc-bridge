@@ -7,6 +7,7 @@ using DocBridge.Mcp;
 // doc-bridge-cli — Kimi fallback (명령서 §8.3)
 //   doc-bridge-cli <tool> [--json '<json>' | --json-file args.json]
 //   doc-bridge-cli <apply_tool> --ops ops.json [--dry-run | --confirm-token conf_...] [--high-risk-confirm]
+//   doc-bridge-cli <apply_tool> --ops execute.json   (object may include executionMode/requestId/expectedDocumentRef)
 // 출력: 어떤 경로로 끝나든 stdout에 결과 JSON 한 줄.
 // exit code: 0 = ok, 1 = tool이 ok=false 반환, 2 = 인자/기동/미지원 tool 오류.
 
@@ -28,6 +29,7 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
     Console.Error.WriteLine("       excel_get_active_context excel_read_range excel_inspect excel_apply_ops excel_disconnect");
     Console.Error.WriteLine("       hwp_plan_creation hwp_launch hwp_get_active_context hwp_doctor hwp_repair_typelib hwp_read_text hwp_apply_ops hwp_submit_ops hwp_get_job");
     Console.Error.WriteLine("       cad_launch cad_get_active_context cad_query_entities cad_apply_ops");
+    Console.Error.WriteLine("       gstarcad_launch gstarcad_get_active_context gstarcad_query_entities gstarcad_apply_ops");
     if (args.Length == 0)
     {
         // stdout만 파싱하는 호출자를 위해 결과 JSON도 남긴다.
@@ -105,15 +107,12 @@ try
             foreach (var (k, v) in obj) toolArgs[k] = v?.DeepClone();
         else
             throw new ArgumentException("ops file must be a JSON array or object");
-        toolArgs["dryRun"] = confirmToken is null; // 토큰 있으면 apply, 없으면 dry-run
     }
-    if (dryRunFlag) toolArgs["dryRun"] = true;
-    if (confirmToken is not null)
-    {
-        toolArgs["dryRun"] = false;
-        toolArgs["confirmToken"] = confirmToken;
-    }
-    if (highRiskConfirm) toolArgs["highRiskConfirm"] = true;
+    CliOpsComposer.Apply(toolArgs, new CliOpsComposer.Flags(
+        OpsLoaded: opsFile is not null,
+        DryRun: dryRunFlag,
+        ConfirmToken: confirmToken,
+        HighRiskConfirm: highRiskConfirm));
 }
 catch (Exception ex)
 {

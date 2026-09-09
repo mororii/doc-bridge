@@ -21,6 +21,9 @@ public sealed class SnapshotService
 
     public const string MetadataFile = "metadata.json";
 
+    /// <summary>Test hook: how many metadata.json files this instance has read.</summary>
+    internal int MetadataFilesRead { get; private set; }
+
     public SnapshotInfo Create(string app, string reason, string? documentRef, Action<string, JsonObject> capture)
     {
         var id = $"{DateTimeOffset.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}";
@@ -36,7 +39,7 @@ public sealed class SnapshotService
             ["reason"] = reason,
         };
 
-        capture(dir, meta); // 어댑터가 백업 페이로드 작성 + metadata 확장
+        capture(dir, meta);
 
         File.WriteAllText(Path.Combine(dir, MetadataFile), meta.ToJsonString(Json.Pretty));
         return new SnapshotInfo(id, meta["createdAt"]!.GetValue<string>(), app,
@@ -46,47 +49,48 @@ public sealed class SnapshotService
     public IReadOnlyList<SnapshotInfo> List(string? app, int limit = 20)
     {
         var result = new List<SnapshotInfo>();
-        var root = _options.SnapshotsDir;
-        if (!Directory.Exists(root)) return result;
-
-        var appDirs = app is null
-            ? Directory.GetDirectories(root)
-            : new[] { Path.Combine(root, app) };
-
-        foreach (var appDir in appDirs)
+        var take = Math.Max(1, limit);
+        foreach (var dir in EnumerateNewestSnapshotDirectories(app))
         {
-            if (!Directory.Exists(appDir)) continue;
-            foreach (var snapDir in Directory.GetDirectories(appDir))
-            {
-                var metaPath = Path.Combine(snapDir, MetadataFile);
-                if (!File.Exists(metaPath)) continue;
-                try
-                {
-                    var meta = JsonNode.Parse(File.ReadAllText(metaPath)) as JsonObject;
-                    if (meta is null) continue;
-                    result.Add(new SnapshotInfo(
-                        Json.GetString(meta, "snapshotId") ?? Path.GetFileName(snapDir),
-                        Json.GetString(meta, "createdAt") ?? "",
-                        Json.GetString(meta, "app") ?? Path.GetFileName(appDir),
-                        Json.GetString(meta, "documentRef"),
-                        Json.GetString(meta, "reason") ?? "",
-                        snapDir));
-                }
-                catch { /* 손상된 스냅샷은 건너뜀 */ }
-            }
+            if (!TryGetDirectoryIdentity(dir, out var folderApp, out var folderId))
+                continue;
+            if (app is not null && !string.Equals(folderApp, app, StringComparison.Ordinal))
+                continue;
+            if (!TryReadSnapshot(dir, folderApp, folderId, out var info, out _))
+                continue;
+            result.Add(info);
+            if (result.Count >= take) break;
         }
-        return result.OrderByDescending(s => s.CreatedAt).Take(Math.Max(1, limit)).ToList();
+        return result;
     }
 
-    public (SnapshotInfo Info, JsonObject Metadata)? Get(string snapshotId)
+    public (SnapshotInfo Info, JsonObject Metadata)? Get(string snapshotId) => Get(snapshotId, app: null);
+
+    /// <summary>
+    /// Exact snapshot-id lookup. Probes <c>snapshots/{app}/{snapshotId}/</c> when
+    /// <paramref name="app"/> is a safe known app; otherwise probes that id under
+    /// each app folder. Never lists or parses sibling snapshot history.
+    /// </summary>
+    public (SnapshotInfo Info, JsonObject Metadata)? Get(string snapshotId, string? app)
     {
-        foreach (var s in List(null, int.MaxValue))
-            if (string.Equals(s.SnapshotId, snapshotId, StringComparison.Ordinal))
-            {
-                var meta = JsonNode.Parse(File.ReadAllText(Path.Combine(s.Dir, MetadataFile))) as JsonObject
-                           ?? new JsonObject();
-                return (s, meta);
-            }
+        if (!IsSafeSnapshotId(snapshotId)) return null;
+        var root = _options.SnapshotsDir;
+        if (!Directory.Exists(root)) return null;
+
+        if (!string.IsNullOrWhiteSpace(app))
+        {
+            if (!IsSafeSnapshotId(app)) return null;
+            return TryGetExact(root, app, snapshotId);
+        }
+
+        foreach (var appDir in Directory.GetDirectories(root))
+        {
+            var folderApp = Path.GetFileName(appDir);
+            if (!IsSafeSnapshotId(folderApp)) continue;
+            var found = TryGetExact(root, folderApp, snapshotId);
+            if (found is not null) return found;
+        }
+
         return null;
     }
 
@@ -105,17 +109,180 @@ public sealed class SnapshotService
         Func<string?, string?, bool> sameDocument,
         int searchLimit = 20)
     {
-        foreach (var info in List(app, Math.Clamp(searchLimit, 1, 100)))
+        if (!IsSafeSnapshotId(app)) return null;
+        var remaining = Math.Clamp(searchLimit, 1, 100);
+        foreach (var dir in EnumerateNewestSnapshotDirectories(app))
         {
-            var found = Get(info.SnapshotId);
-            if (found is null) continue;
-            var metadata = found.Value.Metadata;
-            if (Json.GetInt(metadata, "snapshotReuseVersion") != 1) continue;
-            if (!string.Equals(Json.GetString(metadata, "opsHash"), opsHash, StringComparison.Ordinal)) continue;
-            if (!sameDocument(found.Value.Info.DocumentRef, documentRef)) continue;
-            if (ApplyPreviewArtifact.FromMetadata(metadata, opsHash) is null) continue;
-            return found;
+            if (remaining <= 0) break;
+            if (!TryGetDirectoryIdentity(dir, out var folderApp, out var folderId)
+                || !string.Equals(folderApp, app, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!TryReadSnapshot(dir, folderApp, folderId, out var info, out var metadata, out var metadataRead))
+            {
+                if (metadataRead) remaining--;
+                continue;
+            }
+
+            remaining--;
+            if (Json.GetInt(metadata, "snapshotReuseVersion") == 1
+                && string.Equals(Json.GetString(metadata, "opsHash"), opsHash, StringComparison.Ordinal)
+                && sameDocument(info.DocumentRef, documentRef)
+                && ApplyPreviewArtifact.FromMetadata(metadata, opsHash) is not null)
+            {
+                return (info, metadata);
+            }
         }
+
         return null;
+    }
+
+    internal static bool IsSafeSnapshotId(string? snapshotId)
+    {
+        if (string.IsNullOrWhiteSpace(snapshotId)) return false;
+        if (snapshotId is "." or "..") return false;
+        if (snapshotId.Contains('/') || snapshotId.Contains('\\') || snapshotId.Contains(':'))
+            return false;
+        if (snapshotId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            return false;
+        return snapshotId.IndexOfAny(Path.GetInvalidPathChars()) < 0;
+    }
+
+    private (SnapshotInfo Info, JsonObject Metadata)? TryGetExact(string root, string app, string snapshotId)
+    {
+        var dir = Path.Combine(root, app, snapshotId);
+        if (!Directory.Exists(dir) || !IsDirectoryUnder(root, dir))
+            return null;
+        if (!TryGetDirectoryIdentity(dir, out var folderApp, out var folderId)
+            || !string.Equals(folderApp, app, StringComparison.Ordinal)
+            || !string.Equals(folderId, snapshotId, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        if (!TryReadSnapshot(dir, folderApp, folderId, out var info, out var metadata))
+            return null;
+        return (info, metadata);
+    }
+
+    private static bool TryGetDirectoryIdentity(string dir, out string folderApp, out string folderId)
+    {
+        folderApp = "";
+        folderId = Path.GetFileName(dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        var parent = Directory.GetParent(dir);
+        if (parent is null)
+            return false;
+        folderApp = parent.Name;
+        return IsSafeSnapshotId(folderApp) && IsSafeSnapshotId(folderId);
+    }
+
+    private IEnumerable<string> EnumerateNewestSnapshotDirectories(string? app)
+    {
+        var root = _options.SnapshotsDir;
+        if (!Directory.Exists(root)) return Array.Empty<string>();
+
+        var dirs = new List<string>();
+        IEnumerable<string> appDirs;
+        if (app is null)
+        {
+            appDirs = Directory.GetDirectories(root);
+        }
+        else
+        {
+            if (!IsSafeSnapshotId(app)) return Array.Empty<string>();
+            appDirs = new[] { Path.Combine(root, app) };
+        }
+
+        foreach (var appDir in appDirs)
+        {
+            if (!Directory.Exists(appDir)) continue;
+            foreach (var snapDir in Directory.GetDirectories(appDir))
+            {
+                if (!IsSafeSnapshotId(Path.GetFileName(snapDir))) continue;
+                if (IsDirectoryUnder(root, snapDir))
+                    dirs.Add(snapDir);
+            }
+        }
+
+        return dirs.OrderByDescending(Path.GetFileName, StringComparer.Ordinal);
+    }
+
+    private bool TryReadSnapshot(
+        string dir, string folderApp, string folderId, out SnapshotInfo info, out JsonObject metadata)
+        => TryReadSnapshot(dir, folderApp, folderId, out info, out metadata, out _);
+
+    private bool TryReadSnapshot(
+        string dir,
+        string folderApp,
+        string folderId,
+        out SnapshotInfo info,
+        out JsonObject metadata,
+        out bool metadataRead)
+    {
+        info = new SnapshotInfo("", "", folderApp, null, "", dir);
+        metadata = new JsonObject();
+        metadataRead = false;
+        if (!IsSafeSnapshotId(folderApp) || !IsSafeSnapshotId(folderId))
+            return false;
+        if (!TryGetDirectoryIdentity(dir, out var actualApp, out var actualId)
+            || !string.Equals(actualApp, folderApp, StringComparison.Ordinal)
+            || !string.Equals(actualId, folderId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var metaPath = Path.Combine(dir, MetadataFile);
+        if (!File.Exists(metaPath)) return false;
+        try
+        {
+            MetadataFilesRead++;
+            metadataRead = true;
+            if (JsonNode.Parse(File.ReadAllText(metaPath)) is not JsonObject meta)
+                return false;
+            if (!MetadataIdentityMatchesDirectory(meta, actualApp, actualId))
+                return false;
+
+            metadata = meta;
+            info = new SnapshotInfo(
+                actualId,
+                Json.GetString(meta, "createdAt") ?? "",
+                actualApp,
+                Json.GetString(meta, "documentRef"),
+                Json.GetString(meta, "reason") ?? "",
+                dir);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool MetadataIdentityMatchesDirectory(JsonObject meta, string folderApp, string folderId)
+    {
+        if (meta.ContainsKey("snapshotId")
+            && !string.Equals(Json.GetString(meta, "snapshotId"), folderId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (meta.ContainsKey("app")
+            && !string.Equals(Json.GetString(meta, "app"), folderApp, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsDirectoryUnder(string root, string candidate)
+    {
+        var rootFull = Path.GetFullPath(root);
+        var candidateFull = Path.GetFullPath(candidate);
+        var prefix = rootFull.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                     + Path.DirectorySeparatorChar;
+        return candidateFull.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
     }
 }

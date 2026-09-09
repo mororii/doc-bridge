@@ -186,6 +186,7 @@ public class CadDisplayTests
             ActiveDocument = Documents[0];
         }
         public long HWND => 0;
+        public string Version => "24.0";
         public Document ActiveDocument { get; set; }
         public Document[] Documents { get; }
         public int ZoomCalls { get; private set; }

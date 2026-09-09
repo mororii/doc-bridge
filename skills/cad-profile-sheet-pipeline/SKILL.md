@@ -23,7 +23,7 @@ DocBridge MCP로 열린 AutoCAD 문서를 직접 읽고 편집한다. 화면 좌
 5. AutoLISP 코드를 만들거나 실행하지 않는다. `.lsp`, `(load ...)`, `run_script_template`, LISP 기반 `WBLOCK`, `OOPS`를 사용하지 않는다.
 6. 프로그램 화면 클릭이나 computer-use로 도면을 편집하지 않는다.
 7. XREF 경계 자르기에 한해 DocBridge가 내부적으로 호출하는 AutoCAD 기본 `XCLIP` 명령을 허용한다. 이것은 AutoLISP가 아니다.
-8. 모든 쓰기는 동일한 ops로 `dryRun: true`를 먼저 실행하고, 반환된 `confirmToken`으로 `dryRun: false`를 실행한다. 적용 결과의 `verified`와 `mismatches`를 확인한다.
+8. 이 파이프라인의 복사·XREF·도형·제목 수정·삭제는 동일한 ops로 `dryRun: true`를 먼저 실행하고, 반환된 `confirmToken`으로 `dryRun: false`를 실행한다. 문자·레이어·regen만 저장된 도면의 절대 경로에서 `executionMode=execute`를 쓸 수 있다. 현재 어댑터는 인스턴스 바인딩 참조를 발급하지 않는다. dirty 광범위 작업이나 저장 지문이 맞지 않으면 거절하며 자동 저장으로 우회하지 않는다. 적용 결과의 `verified`와 `mismatches`를 확인한다. 문자·레이어 스냅샷은 그 범위만 복구하며 전체 도면 복구가 아니다.
 9. 적용 전 스냅샷 ID와 대상 문서 경로를 기록한다. 사용자가 저장을 명시하지 않으면 DWG를 강제 저장하지 않는다.
 10. 기존 종단면도·평면도·제목이 있으면 중복 배치하지 않는다. 삭제·교체는 사용자의 범위 승인과 정확한 핸들 또는 증분 인덱스가 있을 때만 수행한다.
 11. 도면 전체를 감으로 배열하지 않는다. 노선, 체인리지, 객체 수, 블록 모듈, 키맵 칸을 하나씩 대조한다.

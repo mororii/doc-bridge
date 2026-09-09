@@ -330,7 +330,7 @@ public sealed partial class CadAdapter
         }
     }
 
-    private static JsonObject InspectLayouts(dynamic doc)
+    private JsonObject InspectLayouts(dynamic doc)
     {
         var layouts = new JsonArray();
         foreach (dynamic layout in doc.Layouts)
@@ -370,7 +370,7 @@ public sealed partial class CadAdapter
         return new JsonObject
         {
             ["ok"] = true,
-            ["app"] = "cad",
+            ["app"] = App,
             ["scope"] = "layouts",
             ["activeLayout"] = activeName,
             ["layouts"] = layouts,
@@ -382,7 +382,7 @@ public sealed partial class CadAdapter
     /// 여러 도곽/평면/종단/제목/키맵 영역을 ModelSpace 한 번의 순회로 집계한다.
     /// 반복 cad_query 호출을 줄이고 각 영역의 객체수·유형·실제 bbox를 함께 검증한다.
     /// </summary>
-    private static JsonObject InspectRegions(dynamic doc, JsonArray specs)
+    private JsonObject InspectRegions(dynamic doc, JsonArray specs)
     {
         if (specs.Count is < 1 or > 100) throw new ArgumentException("regions count must be 1..100");
         var regions = new List<RegionAccumulator>(specs.Count);
@@ -526,13 +526,13 @@ public sealed partial class CadAdapter
         }
         return new JsonObject
         {
-            ["ok"] = errors.Count == 0, ["app"] = "cad", ["scope"] = "regions",
+            ["ok"] = errors.Count == 0, ["app"] = App, ["scope"] = "regions",
             ["verified"] = errors.Count == 0, ["scanned"] = scanned,
             ["regions"] = output, ["errors"] = errors, ["warnings"] = new JsonArray(),
         };
     }
 
-    private static JsonObject InspectLayers(dynamic doc, JsonObject args)
+    private JsonObject InspectLayers(dynamic doc, JsonObject args)
     {
         string? currentLayer = CurrentLayerName(doc);
         var contains = Json.GetString(args, "contains");
@@ -567,7 +567,7 @@ public sealed partial class CadAdapter
         }
         return new JsonObject
         {
-            ["ok"] = true, ["app"] = "cad", ["scope"] = "layers", ["layers"] = layers,
+            ["ok"] = true, ["app"] = App, ["scope"] = "layers", ["layers"] = layers,
             ["currentLayer"] = currentLayer, ["layerStateSemantics"] = LayerStateSemantics(),
             ["count"] = matched, ["scanned"] = scanned, ["totalLayers"] = total,
             ["truncated"] = truncated,
@@ -581,7 +581,7 @@ public sealed partial class CadAdapter
         };
     }
 
-    private static JsonObject InspectXrefs(dynamic doc, JsonObject args)
+    private JsonObject InspectXrefs(dynamic doc, JsonObject args)
     {
         var blockName = Json.GetString(args, "blockName");
         var startIndex = Math.Max(0, Json.GetInt(args, "startIndex") ?? 0);
@@ -677,7 +677,7 @@ public sealed partial class CadAdapter
         }
         return new JsonObject
         {
-            ["ok"] = true, ["app"] = "cad", ["scope"] = "xrefs", ["xrefs"] = xrefs,
+            ["ok"] = true, ["app"] = App, ["scope"] = "xrefs", ["xrefs"] = xrefs,
             ["count"] = xrefs.Count, ["scanned"] = scanned, ["scanStartIndex"] = startIndex,
             ["scanEndIndex"] = scanEndIndex, ["modelSpaceCount"] = (int)doc.ModelSpace.Count,
             ["truncated"] = truncated,
@@ -686,7 +686,7 @@ public sealed partial class CadAdapter
         };
     }
 
-    private static JsonObject InspectWindowSelection(dynamic doc, JsonObject args)
+    private JsonObject InspectWindowSelection(dynamic doc, JsonObject args)
     {
         var bounds = Json.GetObj(args, "bounds")
             ?? throw new ArgumentException("scope=window requires bounds");
@@ -815,7 +815,7 @@ public sealed partial class CadAdapter
             }
             return new JsonObject
             {
-                ["ok"] = true, ["app"] = "cad", ["scope"] = "window", ["entities"] = entities,
+                ["ok"] = true, ["app"] = App, ["scope"] = "window", ["entities"] = entities,
                 ["count"] = count, ["nativeSelected"] = selected, ["selectionMode"] = modeName,
                 ["layerFallback"] = selectedByLayerFallback,
                 ["truncated"] = truncated,

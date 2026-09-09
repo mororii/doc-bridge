@@ -11,6 +11,8 @@ public class ExcelSafetyTests
     [InlineData("'공사 내역'!B2:D5", "공사 내역", "B2:D5")]
     [InlineData("'홍길동''s'!$C$7", "홍길동's", "$C$7")]
     [InlineData("A1:B3", null, "A1:B3")]
+    [InlineData("A1,B2", null, "A1,B2")]
+    [InlineData("Sheet1!A1,C3", "Sheet1", "A1,C3")]
     public void Sheet_qualified_ranges_are_parsed(string input, string? expectedSheet, string expectedAddress)
     {
         var parsed = ExcelRangeReference.Parse(input);
@@ -100,6 +102,25 @@ public class ExcelSafetyTests
         var workbookErrors = new List<string>();
         Assert.NotNull(validator.Validate(workbookReplace, "excel", workbookErrors));
         Assert.Empty(workbookErrors);
+    }
+
+    [Fact]
+    public void Format_range_style_aliases_are_accepted_and_unknown_keys_are_rejected_before_snapshot()
+    {
+        var validator = new OperationValidator(new PolicyEngine());
+        var alias = Json.ParseObject("""
+        { "ops": [ { "op": "format_range", "target": { "sheet": "매출" }, "range": "A1", "style": { "fontBold": true, "interiorColor": 255 } } ], "dryRun": true }
+        """);
+        var aliasErrors = new List<string>();
+        Assert.NotNull(validator.Validate(alias, "excel", aliasErrors));
+        Assert.Empty(aliasErrors);
+
+        var unknown = Json.ParseObject("""
+        { "ops": [ { "op": "format_range", "target": { "sheet": "매출" }, "range": "A1", "style": { "underline": true } } ], "dryRun": true }
+        """);
+        var unknownErrors = new List<string>();
+        Assert.Null(validator.Validate(unknown, "excel", unknownErrors));
+        Assert.Contains(unknownErrors, error => error.Contains("underline") && error.Contains("not supported"));
     }
 
     [Fact]

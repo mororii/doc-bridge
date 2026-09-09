@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>DocBridge.ExcelFormatValidationProbe</AssemblyName>
+    <RootNamespace>DocBridge.Development.ExcelFormatValidationProbe</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Description>Guarded Excel format probe. Isolated baseline: copy the output folder, then replace DocBridge.Core.dll with a frozen build.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\DocBridge.Core\DocBridge.Core.csproj" />
+  </ItemGroup>
+</Project>

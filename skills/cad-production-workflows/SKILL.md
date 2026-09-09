@@ -1,9 +1,15 @@
 ---
 name: cad-production-workflows
-description: AutoCAD DWG/DXF에서 도형·치수·문자·해치 작성, 객체 복사/축척/대칭/offset, 블록 속성, 레이어, 배치·뷰포트, DWG 저장과 PDF 출력을 DocBridge 직접 ActiveX COM으로 수행할 때 사용한다. 도면 분석·시공도 작성·도곽 검증·출력 요청에 적용하며 AutoLISP와 화면 조작은 사용하지 않는다.
+description: AutoCAD 또는 GstarCAD DWG/DXF를 DocBridge 직접 ActiveX COM으로 분석·편집할 때 사용한다. AutoCAD는 도형·해치·블록·레이어·배치·출력, GstarCAD는 별도 도구로 기본 도형·문자·레이어 편집을 지원한다. AutoLISP와 화면 조작은 사용하지 않는다.
 ---
 
-# AutoCAD 실무 제작
+# AutoCAD / GstarCAD 실무 제작
+
+## 제품을 먼저 구분한다
+
+- AutoCAD는 `cad_*`, GstarCAD는 `gstarcad_*` 도구만 사용한다. GstarCAD 작업에서 아래 공통 읽기/기본 편집 지침의 `cad_*`는 `gstarcad_*`, `app:"cad"`는 `app:"gstarcad"`로 선택한다. 두 제품을 자동 대체 연결하지 않는다.
+- GstarCAD는 `core_get_capabilities({"app":"gstarcad"})`의 지원 목록을 먼저 확인한다. 해치, 문서 간 복사, XREF, 블록 삽입, 배치/뷰포트 편집, PDF 출력, 등록 스크립트, RGB는 아직 지원하지 않는다. 아래 AutoCAD 고급 기능 지침을 GstarCAD에 적용하지 않는다. ACI 색상과 동일 도면 내 기본 편집을 사용한다.
+- GstarCAD에서 필요한 전용 도구가 없으면 구버전일 수 있다. 원본 AutoCAD 도구나 외부 COM 스크립트로 우회하지 말고 업데이트 후 새 작업에서 확인한다.
 
 모든 도면 판단은 좌표·핸들·레이어·객체 유형·bbox를 근거로 한다. 화면은 최종 확인용이며 편집 수단이 아니다.
 
@@ -16,12 +22,12 @@ description: AutoCAD DWG/DXF에서 도형·치수·문자·해치 작성, 객체
 
 ## 절대 규칙
 
-1. `core_get_capabilities({"app":"cad"})`, `cad_get_active_context({"detailLevel":"basic"})`으로 열린 문서와 대상 DWG를 확인한다. `basic`은 대형 도면의 COM 엔티티·레이어를 순회하지 않으므로 `layers`가 빈 배열인 것이 정상이다. 레이어 미리보기와 최대 500개 유형 표본이 실제로 필요할 때만 `detailLevel:"summary"`를 사용한다.
+1. 한 앱 작업은 `core_get_status({"app":"cad"})`로 시작한다. ping·전체 앱 조회를 반복하지 않는다. 지원 목록이 필요할 때만 `core_get_capabilities({"app":"cad"})`를 보고, `cad_get_active_context({"detailLevel":"basic"})`으로 열린 문서와 대상 DWG를 확인한다. `basic`은 대형 도면의 COM 엔티티·레이어를 순회하지 않으므로 `layers`가 빈 배열인 것이 정상이다. 레이어 미리보기와 최대 500개 유형 표본이 실제로 필요할 때만 `detailLevel:"summary"`를 사용한다.
 2. 쓰기 배치 첫 op에 `activate_document`를 넣어 탭 전환 오작업을 막는다.
 3. AutoLISP/LSP, WBLOCK 우회, computer-use, SendKeys를 사용하지 않는다.
 4. XREF 자르기만 DocBridge 내부의 AutoCAD 기본 XCLIP을 허용한다.
-5. 쓰기 전 같은 ops의 dry-run과 스냅샷을 만들고, 적용 후 `readback.verified`와 영역/핸들 재조회로 확인한다.
-6. 삭제·저장·PDF 출력·등록 스크립트는 명시적 승인과 `highRiskConfirm:true`가 필요하다.
+5. 저장된 도면의 `set_text_value`/`set_layer_visibility`/`set_layer_color`/`regen_document`는 `executionMode=execute`와 새 UUID `requestId`, 저장된 절대 경로 `expectedDocumentRef`로 한 번에 적용한다. 현재 어댑터는 인스턴스 바인딩 참조를 발급하지 않는다. `dryRun`/`confirmToken`/`highRiskConfirm`을 넣지 않는다. 도형·이동·복사·줌·삭제·저장·내보내기·`activate_document`는 기존 dry-run → 같은 ops/`confirmToken`이다. dirty 광범위 작업이나 저장 지문이 맞지 않으면 거절한다. `Drawing1`은 저장해 경로를 만들지 않으며 지문 거절을 우회하지 않는다. 문자 핸들·레이어 스냅샷은 그 범위만 복구하며 전체 도면 복구가 아니다. Geometry 스냅샷은 drawing-backup과 부분 상태이며 자동 복구를 보장하지 않는다. 적용 후 응답 `readback`을 확인하고, 필요한 영역/핸들만 다시 조회한다.
+6. 삭제·저장·PDF 출력·등록 스크립트는 토큰 경로에서 명시적 승인과 `highRiskConfirm:true`가 필요하다. `highRiskConfirm`은 권한 UI를 대체하거나 사람 승인을 증명하지 않는다. 이미 요청한 저장·PDF에 새 질문을 무조건 요구하지 않는다.
 7. DocBridge는 다른 앱에서 작업 중인 사용자의 전경 창을 유지한다. AutoCAD API가 대상 도면이나 배치를 내부 활성화하더라도 배치가 끝나면 원래 도면·레이아웃·모델/종이 공간·보기 중심과 크기를 복원한다. 화면 클릭이나 강제 창 활성화로 보조하지 않는다.
 8. 사용자가 다른 프로그램에서 계속 일하는 것은 허용하지만 같은 AutoCAD 창의 동시 조작은 허용하지 않는다. `interaction.userActivityDetected:true`, `interaction.interrupted:true`, 또는 `APP_USER_ACTIVITY_DETECTED`가 반환되면 남은 op를 완료됐다고 보고하지 말고 도면을 다시 조회한 뒤 미실행 단계만 새 dry-run으로 만든다. `foregroundPreserved:false`나 `originalStateRestored:false`이면 추가 쓰기 전에 활성 문서·레이아웃을 재확인한다.
 
@@ -46,7 +52,7 @@ description: AutoCAD DWG/DXF에서 도형·치수·문자·해치 작성, 객체
 ## 편집 후 표시 문제
 
 - 문자가 마우스를 올릴 때만 보이면 위치/크기/색상을 임의로 다시 바꾸지 않는다. 핸들 재조회(`includeGeometry:true`)로 실제 문자·좌표·색상·visible·transparency와 레이어 상태를 먼저 확인한다.
-- 쓰기 후 `readback.displayRefresh.status`를 확인한다. 자동 `Regen(acAllViewports)`가 실패하면 이미 적용된 move/scale을 반복하지 말고 `activate_document` + `regen_document`만 별도 dry-run → apply한다. 재생성은 좌표·문자 내용·색상을 변경하지 않는다.
+- 쓰기 후 `readback.displayRefresh.status`를 확인한다. 자동 `Regen(acAllViewports)`가 실패하면 이미 적용된 move/scale을 반복하지 말고 `regen_document`만 적용한다. 저장된 도면이면 execute, 미저장 이름은 토큰 경로다. `activate_document`는 execute가 아니다. 재생성은 좌표·문자 내용·색상을 변경하지 않는다.
 - `readback.verified`는 데이터 검증, `displayRefresh:completed`는 API 갱신 완료다. 둘 다 눈으로 확인한 배치 품질/겹침 없음의 증거가 아니다. PDF 검수나 사용자의 화면 확인을 구분해서 보고한다.
 
 ## 배치와 출력

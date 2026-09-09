@@ -15,9 +15,9 @@ namespace DocBridge.Core.Services;
 /// COM 자동화 호출은 named mutex(Global\DocBridge.Automation)로
 /// 크로스 프로세스 직렬화한다 (Claude/Codex 동시 stdio 서버 대비).
 /// </summary>
-public sealed class DocBridgeHost : IDisposable
+public sealed partial class DocBridgeHost : IDisposable
 {
-    public const string Version = "0.4.19";
+    public const string Version = "0.4.20";
     private const string AutomationMutex = @"Global\DocBridge.Automation";
 
     private readonly DocBridgeOptions _options;
@@ -25,6 +25,7 @@ public sealed class DocBridgeHost : IDisposable
     private readonly OperationValidator _validator;
     private readonly ConfirmTokenService _tokens;
     private readonly SnapshotService _snapshots;
+    private readonly ExecuteJournalService _executeJournal;
     private readonly AuditLog _audit;
     private readonly SessionRouter _router;
 
@@ -37,6 +38,7 @@ public sealed class DocBridgeHost : IDisposable
         ConfirmTokenService.WarmUpCrypto();
         _tokens = new ConfirmTokenService(_options, _policy.TokenTtlSeconds);
         _snapshots = new SnapshotService(_options);
+        _executeJournal = new ExecuteJournalService(_options);
         _audit = new AuditLog(_options);
         _router = new SessionRouter();
     }
@@ -53,7 +55,9 @@ public sealed class DocBridgeHost : IDisposable
         var wait = Stopwatch.StartNew();
         try
         {
-            acquired = mutex.WaitOne(TimeSpan.FromSeconds(60));
+            // AbandonedMutexException still transfers ownership. Treat that as acquired
+            // and release in finally; otherwise a crashed host leaves later callers throwing.
+            acquired = TryAcquireMutex(mutex, TimeSpan.FromSeconds(60), out _);
             wait.Stop();
             lockTiming?.Invoke(wait.ElapsedMilliseconds);
             if (!acquired)
@@ -63,6 +67,24 @@ public sealed class DocBridgeHost : IDisposable
         finally
         {
             if (acquired) mutex.ReleaseMutex();
+        }
+    }
+
+    /// <summary>
+    /// WaitOne throws AbandonedMutexException when a previous owner crashed. The
+    /// current thread then owns the mutex and must ReleaseMutex.
+    /// </summary>
+    internal static bool TryAcquireMutex(Mutex mutex, TimeSpan timeout, out bool abandoned)
+    {
+        abandoned = false;
+        try
+        {
+            return mutex.WaitOne(timeout);
+        }
+        catch (AbandonedMutexException)
+        {
+            abandoned = true;
+            return true;
         }
     }
 
@@ -80,10 +102,19 @@ public sealed class DocBridgeHost : IDisposable
         };
     }
 
-    public JsonObject CoreGetStatus()
+    public JsonObject CoreGetStatus() => CoreGetStatus(null);
+
+    public JsonObject CoreGetStatus(JsonObject? args)
     {
+        var requested = Json.GetString(args, "app");
+        var names = string.IsNullOrWhiteSpace(requested)
+            ? _router.Apps.ToArray()
+            : _router.Apps.Where(name => name.Equals(requested, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (names.Length == 0)
+            return Json.ErrorResult($"unknown app '{requested}'. supported: excel, hwp, cad, gstarcad");
+
         var apps = new JsonObject();
-        foreach (var app in _router.Apps)
+        foreach (var app in names)
         {
             try
             {
@@ -141,7 +172,7 @@ public sealed class DocBridgeHost : IDisposable
             ? _router.Apps.Where(name => !name.Equals("fake", StringComparison.OrdinalIgnoreCase)).ToArray()
             : _router.Apps.Where(name => name.Equals(requested, StringComparison.OrdinalIgnoreCase)).ToArray();
         if (names.Length == 0)
-            return Json.ErrorResult($"unknown app '{requested}'. supported: excel, hwp, cad");
+            return Json.ErrorResult($"unknown app '{requested}'. supported: excel, hwp, cad, gstarcad");
 
         var apps = new JsonObject();
         foreach (var app in names)
@@ -156,6 +187,7 @@ public sealed class DocBridgeHost : IDisposable
                 capability["connected"] = status.Connected;
                 capability["programVersion"] = status.Version;
                 capability["documentRef"] = status.Document;
+                AttachExecutionCapabilities(app, capability);
                 apps[app] = capability;
             }
             catch (Exception ex)
@@ -386,17 +418,18 @@ public sealed class DocBridgeHost : IDisposable
         }
     }
 
-    public JsonObject CadLaunch(JsonObject? args)
+    public JsonObject CadLaunch(JsonObject? args, string app = "cad")
     {
-        const string tool = "cad_launch";
+        if (app is not ("cad" or "gstarcad")) return Json.ErrorResult("unsupported CAD product", app);
+        var tool = $"{app}_launch";
         try
         {
             return WithAutomationLock(() =>
             {
-                if (_router.Get("cad") is not CadAdapter adapter)
-                    return Json.ErrorResult("cad adapter does not support launching", "cad");
+                if (_router.Get(app) is not CadAdapter adapter)
+                    return Json.ErrorResult($"{app} adapter does not support launching", app);
                 var result = adapter.Launch(args ?? new JsonObject());
-                _audit.Write(tool, "cad", "launch", new JsonObject
+                _audit.Write(tool, app, "launch", new JsonObject
                 {
                     ["documentRef"] = Json.GetString(result, "documentRef"),
                 }, Json.GetBool(result, "ok"),
@@ -406,8 +439,8 @@ public sealed class DocBridgeHost : IDisposable
         }
         catch (Exception ex)
         {
-            _audit.Write(tool, "cad", "launch", null, false, new[] { ex.Message });
-            return Json.ErrorResult($"cad launch failed: {ex.Message}", "cad");
+            _audit.Write(tool, app, "launch", null, false, new[] { ex.Message });
+            return Json.ErrorResult($"{app} launch failed: {ex.Message}", app);
         }
     }
 
@@ -418,7 +451,7 @@ public sealed class DocBridgeHost : IDisposable
             return WithAutomationLock(() =>
             {
                 var adapter = _router.Get(app);
-                var ctx = app.Equals("cad", StringComparison.OrdinalIgnoreCase) && adapter is CadAdapter cad
+                var ctx = adapter is CadAdapter cad
                     ? cad.GetActiveContext(args)
                     : adapter.GetActiveContext();
                 _audit.Write($"{app}_get_active_context", app, "read",
@@ -489,7 +522,15 @@ public sealed class DocBridgeHost : IDisposable
         if (parsed is null)
         {
             _audit.Write(tool, app, "deny", null, false, errors);
-            var deny = new JsonObject { ["ok"] = false, ["dryRun"] = Json.GetBool(batch, "dryRun", true) };
+            var executeDenied = string.Equals(
+                Json.GetString(batch, "executionMode"), OperationValidator.ExecutionModeExecute,
+                StringComparison.OrdinalIgnoreCase);
+            var deny = new JsonObject
+            {
+                ["ok"] = false,
+                ["dryRun"] = executeDenied ? false : Json.GetBool(batch, "dryRun", true),
+            };
+            if (executeDenied) deny["executionMode"] = OperationValidator.ExecutionModeExecute;
             deny["errors"] = Json.ToArray(errors);
             var expectedSchemas = _validator.DescribeExpectedSchemas(batch, app);
             if (expectedSchemas.Count > 0) deny["expectedSchema"] = expectedSchemas;
@@ -498,6 +539,44 @@ public sealed class DocBridgeHost : IDisposable
 
         var opsHash = ConfirmTokenService.HashOps(parsed.Ops);
         var scope = $"apply:{app}";
+
+        if (parsed.ExecutionMode == OperationValidator.ExecutionModeExecute &&
+            !string.IsNullOrWhiteSpace(parsed.ExpectedDocumentRef))
+        {
+            parsed = parsed with
+            {
+                Ops = DocumentTargetBinder.CloneBoundOps(app, parsed.Ops, parsed.ExpectedDocumentRef),
+            };
+        }
+
+        if (parsed.ExecutionMode == OperationValidator.ExecutionModeExecute)
+        {
+            try
+            {
+                return Finish(ApplyExecute(app, tool, parsed, opsHash, timings, AuditTimings));
+            }
+            catch (Exception ex)
+            {
+                _audit.Write(tool, app, "apply", new JsonObject { ["requestId"] = parsed.RequestId }, false, new[] { ex.Message });
+                var failed = AutomationErrorResult("apply failed", app, ex);
+                failed["dryRun"] = false;
+                failed["executionMode"] = OperationValidator.ExecutionModeExecute;
+                failed["requestId"] = parsed.RequestId;
+                failed["safeToRetry"] = false;
+                if (parsed.RequestId is not null)
+                {
+                    var after = _executeJournal.Lookup(parsed.RequestId);
+                    if (after.State is ExecuteJournalState.Started or ExecuteJournalState.Unreadable)
+                    {
+                        failed["outcomeUnknown"] = true;
+                        failed["journalStatus"] = after.State == ExecuteJournalState.Started
+                            ? "started"
+                            : "unreadable";
+                    }
+                }
+                return Finish(failed);
+            }
+        }
 
         try
         {
@@ -691,24 +770,43 @@ public sealed class DocBridgeHost : IDisposable
 
                 ApplyPreview? preview = null;
                 var cachedPreview = ApplyPreviewArtifact.FromMetadata(snapshot.Value.Metadata, opsHash);
-                if (cachedPreview is not null && adapter is IPreviewReuseAdapter reusableAdapter)
+                if (adapter is IPreviewReuseAdapter reusableAdapter)
                 {
+                    // Always validate before consume, including when the cached preview
+                    // artifact is missing. Format-only Excel can deny on fingerprint change;
+                    // non-format Excel may request a fresh preview instead.
                     var fingerprintStarted = Stopwatch.StartNew();
                     var validation = reusableAdapter.ValidatePreviewReuse(
                         snapshot.Value.Info.Dir, snapshot.Value.Metadata, parsed.Ops);
                     fingerprintStarted.Stop();
                     timings["fingerprintValidationMs"] = fingerprintStarted.ElapsedMilliseconds;
                     timings["fingerprintMethod"] = Json.GetString(validation, "fingerprintMethod");
-                    if (!Json.GetBool(validation, "reusable"))
+                    var reusable = Json.GetBool(validation, "reusable");
+                    var freshPreviewAllowed = Json.GetBool(validation, "freshPreviewAllowed");
+                    if (reusable && cachedPreview is not null)
+                    {
+                        preview = cachedPreview;
+                        timings["previewReused"] = true;
+                        timings["previewMs"] = 0L;
+                    }
+                    else if (reusable || freshPreviewAllowed)
+                    {
+                        var previewStarted = Stopwatch.StartNew();
+                        preview = adapter.Preview(parsed.Ops);
+                        previewStarted.Stop();
+                        timings["previewMs"] = previewStarted.ElapsedMilliseconds;
+                        timings["previewReused"] = false;
+                        timings["previewReuseReason"] = reusable
+                            ? "cached preview missing after fingerprint match"
+                            : Json.GetString(validation, "reason") ?? "fresh preview required";
+                    }
+                    else
                     {
                         var reason = Json.GetString(validation, "reason") ?? "document fingerprint changed";
                         var msg = $"document changed after dry-run ({reason}); run dry-run again";
                         _audit.Write(tool, app, "deny", validation, false, new[] { msg });
                         return Json.ErrorResult(msg, app);
                     }
-                    preview = cachedPreview;
-                    timings["previewReused"] = true;
-                    timings["previewMs"] = 0L;
                 }
                 else
                 {
@@ -752,103 +850,11 @@ public sealed class DocBridgeHost : IDisposable
                     return Json.ErrorResult(check.Error!, app);
                 }
 
-                // 6) apply + 7) readback verify. A failed or thrown batch is restored
-                // from the exact pre-apply snapshot without requiring another approval.
-                var applyStarted = Stopwatch.StartNew();
-                ApplyExecution exec;
-                HwpAutomationException? hwpApplyError = null;
-                try
-                {
-                    exec = adapter.Apply(parsed.Ops, check.SnapshotId ?? "");
-                }
-                catch (Exception applyError)
-                {
-                    exec = new ApplyExecution { Ok = false };
-                    hwpApplyError = app.Equals("hwp", StringComparison.OrdinalIgnoreCase)
-                        ? FindHwpAutomationException(applyError)
-                        : null;
-                    exec.Errors.Add(hwpApplyError is null
-                        ? $"apply threw: {applyError.Message}"
-                        : $"[{hwpApplyError.Code}] {hwpApplyError.Message}");
-                }
-                applyStarted.Stop();
-                timings["applyMs"] = applyStarted.ElapsedMilliseconds;
-
-                if (exec.OperationResults.Count == 0)
-                {
-                    for (var index = 0; index < parsed.Ops.Count; index++)
-                    {
-                        exec.OperationResults.Add(new JsonObject
-                        {
-                            ["index"] = index,
-                            ["op"] = Json.GetString(parsed.Ops[index], "op") ?? "?",
-                            ["ok"] = exec.Ok,
-                            ["elapsedMs"] = index == 0 ? applyStarted.ElapsedMilliseconds : 0,
-                            ["timingScope"] = "batch-fallback",
-                        });
-                    }
-                }
-
-                var rollback = new JsonObject
-                {
-                    ["attempted"] = false,
-                    ["verified"] = false,
-                };
-                if (!exec.Ok)
-                {
-                    rollback["attempted"] = true;
-                    var rollbackStarted = Stopwatch.StartNew();
-                    try
-                    {
-                        var restored = adapter.RestoreSnapshot(snapshot.Value.Info.Dir, snapshot.Value.Metadata);
-                        rollback["result"] = restored.DeepClone();
-                        rollback["verified"] = Json.GetBool(restored, "ok") &&
-                            (Json.GetObj(restored, "readback") is not { } rb || Json.GetBool(rb, "verified", true));
-                        if (Json.GetBool(rollback, "verified"))
-                            exec.Warnings.Add("apply failed; the pre-apply snapshot was restored automatically");
-                        else
-                            exec.Errors.Add("apply failed and automatic rollback could not be verified");
-                    }
-                    catch (Exception rollbackError)
-                    {
-                        rollback["error"] = rollbackError.Message;
-                        exec.Errors.Add($"automatic rollback failed: {rollbackError.Message}");
-                    }
-                    finally
-                    {
-                        rollbackStarted.Stop();
-                        rollback["elapsedMs"] = rollbackStarted.ElapsedMilliseconds;
-                        timings["rollbackMs"] = rollbackStarted.ElapsedMilliseconds;
-                    }
-                }
-                _audit.Write(tool, app, "apply", new JsonObject
-                {
-                    ["snapshotId"] = check.SnapshotId,
-                    ["ops"] = OpsSummary(parsed.Ops),
-                    ["readbackOk"] = exec.Readback is not null && Json.GetBool(exec.Readback, "verified"),
-                    ["elapsedMs"] = applyStarted.ElapsedMilliseconds,
-                    ["rollback"] = rollback.DeepClone(),
-                    ["operationResults"] = OperationTimingSummary(exec.OperationResults),
-                    ["timings"] = AuditTimings(),
-                }, exec.Ok, exec.Errors);
-
-                var applyResult = new JsonObject
-                {
-                    ["ok"] = exec.Ok,
-                    ["dryRun"] = false,
-                    ["snapshotId"] = check.SnapshotId,
-                    ["affected"] = Json.ToArray(exec.Affected),
-                    ["diff"] = Json.ToArray(exec.Diff),
-                    ["operationResults"] = exec.OperationResults.DeepClone(),
-                    ["elapsedMs"] = applyStarted.ElapsedMilliseconds,
-                    ["readback"] = exec.Readback?.DeepClone(),
-                    ["interaction"] = exec.Interaction?.DeepClone(),
-                    ["rollback"] = rollback,
-                    ["warnings"] = Json.ToArray(exec.Warnings),
-                    ["errors"] = Json.ToArray(exec.Errors),
-                };
-                if (hwpApplyError is not null) AddHwpAutomationError(applyResult, app, hwpApplyError);
-                return applyResult;
+                return CompleteWrite(
+                    tool, app, adapter, parsed,
+                    check.SnapshotId ?? snapshot.Value.Info.SnapshotId,
+                    snapshot.Value.Info, snapshot.Value.Metadata,
+                    timings, AuditTimings);
             }, elapsed => timings["lockWaitMs"] = elapsed);
             return Finish(result);
         }
@@ -959,8 +965,8 @@ public sealed class DocBridgeHost : IDisposable
         if (string.IsNullOrWhiteSpace(expected) || string.IsNullOrWhiteSpace(current))
             return string.Equals(expected ?? "", current ?? "", StringComparison.OrdinalIgnoreCase);
         if (string.Equals(app, "hwp", StringComparison.OrdinalIgnoreCase) &&
-            TryParseHwpTransientRef(expected, out var expectedProcess, out var expectedDocument) &&
-            TryParseHwpTransientRef(current, out var currentProcess, out var currentDocument))
+            DocumentIdentity.TryParseHwpStableRef(expected, out var expectedProcess, out var expectedDocument) &&
+            DocumentIdentity.TryParseHwpStableRef(current, out var currentProcess, out var currentDocument))
             return expectedProcess == currentProcess && expectedDocument == currentDocument;
         try
         {
@@ -969,24 +975,6 @@ public sealed class DocBridgeHost : IDisposable
         }
         catch { return false; }
         return string.Equals(expected, current, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool TryParseHwpTransientRef(string value, out string processId, out string documentId)
-    {
-        processId = "";
-        documentId = "";
-        string[] parts;
-        if (value.StartsWith("hwp:", StringComparison.OrdinalIgnoreCase))
-            parts = value.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        else if (value.StartsWith("untitled-", StringComparison.OrdinalIgnoreCase))
-            parts = value.Split('-', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        else
-            return false;
-
-        if (parts.Length < 3) return false;
-        processId = parts[1];
-        documentId = parts[^1];
-        return int.TryParse(processId, out _) && int.TryParse(documentId, out _);
     }
 
     public void Dispose() => _router.Dispose();

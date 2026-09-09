@@ -29,7 +29,9 @@ public sealed class ToolRegistry
         {
             ["type"] = "object",
             ["description"] = $"{app} 쓰기 ops 배치. 허용 op: {allowedOps}. " +
-                              "dryRun=true로 diff+confirmToken을 받은 뒤, 사용자 승인 시 같은 ops를 dryRun=false+confirmToken으로 재호출한다.",
+                              "일반 autoExecute 편집은 executionMode=execute와 UUID requestId, 안정적인 expectedDocumentRef(Excel/CAD/Gstar는 절대 경로)로 한 번에 적용한다. " +
+                              "dryRun/confirmToken/highRiskConfirm과 execute를 함께 쓰지 않는다. " +
+                              "미리보기·고위험·구조 변경은 dryRun=true로 diff+confirmToken을 받은 뒤 같은 ops를 dryRun=false+confirmToken으로 재호출한다.",
             ["properties"] = new JsonObject
             {
                 ["ops"] = new JsonObject
@@ -38,11 +40,27 @@ public sealed class ToolRegistry
                     ["description"] = "Operation[] (공통 스키마 §7)",
                     ["items"] = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject { ["op"] = new JsonObject { ["type"] = "string" } }, ["required"] = new JsonArray("op") },
                 },
-                ["dryRun"] = new JsonObject { ["type"] = "boolean", ["description"] = "true면 미적용 diff/confirmToken 발급" },
-                ["confirmToken"] = new JsonObject { ["type"] = "string", ["description"] = "직전 dry-run이 발급한 토큰 (dryRun=false 시 필수)" },
-                ["highRiskConfirm"] = new JsonObject { ["type"] = "boolean", ["description"] = "고위험 op 포함 시 사용자 명시 승인 표시" },
+                ["dryRun"] = new JsonObject { ["type"] = "boolean", ["description"] = "true면 미적용 diff/confirmToken 발급. executionMode=execute와 함께 쓰지 않음" },
+                ["confirmToken"] = new JsonObject { ["type"] = "string", ["description"] = "직전 dry-run이 발급한 토큰 (legacy dryRun=false 시 필수). execute와 함께 쓰지 않음" },
+                ["highRiskConfirm"] = new JsonObject { ["type"] = "boolean", ["description"] = "고위험 op의 사용자 명시 승인 표시. 사람 승인을 증명하지 않으며 execute와 함께 쓰지 않음" },
+                ["executionMode"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["enum"] = new JsonArray("execute"),
+                    ["description"] = "일반 allowlist 편집을 승인 대기 없이 적용. requestId와 expectedDocumentRef 필수.",
+                },
+                ["requestId"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["description"] = "executionMode=execute에 필요한 UUID. 같은 id·앱·문서·ops는 이전 결과를 재전달하고 앱을 다시 호출하지 않는다.",
+                },
+                ["expectedDocumentRef"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["description"] = "executionMode=execute에 필요한 대상 문서. Excel/CAD/Gstar는 절대 경로 또는 어댑터 인스턴스 바인딩 참조. Book1/Drawing1은 모호하므로 저장하지 않고 dry-run+confirmToken을 쓴다. HWP는 hwp:PID:id / untitled-PID-id 허용. 모든 명시적 op 대상과 일치해야 하며 활성 문서만으로 다른 workbook을 추정하지 않는다.",
+                },
             },
-            ["required"] = new JsonArray("ops", "dryRun"),
+            ["required"] = new JsonArray("ops"),
         };
 
         JsonObject ExcelApplyOpsSchema()
@@ -57,7 +75,8 @@ public sealed class ToolRegistry
                 "merge_cells는 좌상단 외 셀에 값/수식이 있으면 데이터 손실 방지를 위해 거부합니다. " +
                 "활성 시트와 마지막 표시 시트는 숨기지 않습니다. " +
                 "find_replace의 target.scope='workbook'과 copy_sheet는 자체적으로 대상을 명시합니다. " +
-                "dryRun=true로 diff+confirmToken을 받은 뒤 동일한 ops를 dryRun=false+confirmToken으로 다시 호출합니다.";
+                "일반 셀 값/수식/서식은 executionMode=execute + requestId + expectedDocumentRef로 한 번에 적용할 수 있습니다. " +
+                "행열 삽입, 병합, 숨김, 시트 복사와 미리보기·고위험은 dryRun=true로 diff+confirmToken을 받은 뒤 동일한 ops를 dryRun=false+confirmToken으로 다시 호출합니다.";
 
             var items = (JsonObject)((JsonObject)((JsonObject)schema["properties"]!)["ops"]!)["items"]!;
             items["properties"] = new JsonObject
@@ -119,7 +138,7 @@ public sealed class ToolRegistry
                         ["scope"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("sheet", "workbook") },
                     },
                 },
-                ["style"] = new JsonObject { ["type"] = "object" },
+                ["style"] = ExcelStyleContract.DescribeStyleSchema(),
                 ["find"] = new JsonObject { ["type"] = "string" },
                 ["replace"] = new JsonObject { ["type"] = "string" },
                 ["options"] = new JsonObject
@@ -157,7 +176,8 @@ public sealed class ToolRegistry
                 "활성 문서는 대상을 생략하고, 여러 열린 문서 중 하나는 hwp_get_active_context.openDocuments의 documentRef를 모든 op에 동일하게 지정합니다. " +
                 "파일 작업은 모든 op에 같은 절대 file을 지정하며 file과 documentRef는 함께 쓰지 않습니다. " +
                 "PowerShell/Python COM 우회나 새 한글 프로세스 반복 실행은 금지됩니다. " +
-                "dryRun=true로 diff+confirmToken을 받은 뒤 같은 ops로 적용합니다.";
+                "일반 텍스트/표 셀/필드/문단 서식은 executionMode=execute + requestId + expectedDocumentRef로 한 번에 적용할 수 있습니다. " +
+                "표 구조 변경, PDF보내기, 미리보기와 고위험은 dryRun=true로 diff+confirmToken을 받은 뒤 같은 ops로 적용합니다.";
             var properties = (JsonObject)((JsonObject)((JsonObject)schema["properties"]!)["ops"]!)["items"]!;
             properties["properties"] = new JsonObject
             {
@@ -452,9 +472,22 @@ public sealed class ToolRegistry
                 NoInput("입력 없음"),
                 _ => host.CorePing()),
 
-            new("core_get_status", "실행 중인 어댑터, 연결된 프로그램, 현재 문서 요약",
-                NoInput("입력 없음"),
-                _ => host.CoreGetStatus()),
+            new("core_get_status", "실행 중인 어댑터, 연결된 프로그램, 현재 문서 요약. app을 주면 그 앱만 조회한다.",
+                new JsonObject
+                {
+                    ["type"] = "object",
+                    ["description"] = "생략하면 기존처럼 모든 앱을 조회한다. 한 앱만 다룰 때는 app 필터로 다른 앱 연결 비용을 피한다.",
+                    ["properties"] = new JsonObject
+                    {
+                        ["app"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = new JsonArray("excel", "hwp", "cad", "gstarcad"),
+                            ["description"] = "선택. 지정하면 해당 앱 상태만 반환한다.",
+                        },
+                    },
+                },
+                a => host.CoreGetStatus(a)),
 
             new("core_disconnect", "서버를 종료하지 않고 지정 앱의 COM 연결을 해제합니다. Excel은 DocBridge가 만든 인스턴스만 안전 조건에서 종료하며 사용자 Excel은 절대 종료하지 않습니다.",
                 new JsonObject
@@ -477,8 +510,8 @@ public sealed class ToolRegistry
                         ["app"] = new JsonObject
                         {
                             ["type"] = "string",
-                            ["enum"] = new JsonArray("excel", "hwp", "cad"),
-                            ["description"] = "생략하면 세 앱 전체를 반환",
+                            ["enum"] = new JsonArray("excel", "hwp", "cad", "gstarcad"),
+                            ["description"] = "생략하면 Excel/HWP/AutoCAD/GstarCAD 전체를 반환",
                         },
                     },
                 },
@@ -490,7 +523,7 @@ public sealed class ToolRegistry
                     ["type"] = "object",
                     ["properties"] = new JsonObject
                     {
-                        ["app"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("excel", "hwp", "cad") },
+                        ["app"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("excel", "hwp", "cad", "gstarcad") },
                         ["reason"] = new JsonObject { ["type"] = "string" },
                     },
                     ["required"] = new JsonArray("app"),
@@ -542,7 +575,11 @@ public sealed class ToolRegistry
                         },
                         ["sheet"] = new JsonObject { ["type"] = "string" },
                         ["includeFormulas"] = new JsonObject { ["type"] = "boolean" },
-                        ["includeStyles"] = new JsonObject { ["type"] = "boolean" },
+                        ["includeStyles"] = new JsonObject
+                        {
+                            ["type"] = "boolean",
+                            ["description"] = ExcelStyleContract.ReadStyleExpectation,
+                        },
                         ["includeLayout"] = new JsonObject
                         {
                             ["type"] = "boolean",
@@ -805,6 +842,29 @@ public sealed class ToolRegistry
                 ApplyOpsSchema("cad", "activate_document, regen_document(화면만 재생성; 좌표/문자 변경 없음), set_layer_visibility/color, move/rotate/set_text, copy_entities_between_documents, insert_xref, zoom_window, draw_entities(lwpolyline/circle/block/text/hatch/line/arc/ellipse/point/mtext/dim_aligned/dim_rotated), copy/scale/mirror/offset_entities, set_entity_properties, set_block_attributes, configure_layout, create_viewport / 고위험: save_document, plot_pdf, delete_entities*, run_script_template. 편집 후 배치당 자동 Regen; readback.displayRefresh 별도 확인, 실패 시 이동/축척 재실행 금지"),
                 a => host.ApplyOps("cad", a)),
         };
+
+        // Separate public names and handlers: the existing cad_* tools always target AutoCAD.
+        var gstarContext = (JsonObject)Find("cad_get_active_context")!.InputSchema.DeepClone();
+        gstarContext["properties"]!["detailLevel"]!["description"] =
+            "GstarCAD only. basic: document/count/currentLayer. summary: bounded layer/entity summary. Continue with gstarcad_query_entities.";
+        var gstarRead = (JsonObject)Find("cad_query_entities")!.InputSchema.DeepClone();
+        gstarRead["properties"]!["file"]!["description"] = "DWG/DXF path; DWG reads use GstarCAD only.";
+        _tools.Add(new("gstarcad_get_active_context", "GstarCAD 전용 연결/열린 도면 조회. AutoCAD와 독립적이며 새 창을 생성하지 않음.",
+            gstarContext, a => host.GetActiveContext("gstarcad", a)));
+        _tools.Add(new("gstarcad_query_entities", "GstarCAD 전용 엔티티·문자·레이어 상태·배치·영역 조회. AutoCAD로 대체 연결하지 않음.",
+            gstarRead, a => host.Read("gstarcad", a)));
+        _tools.Add(new("gstarcad_apply_ops", "GstarCAD 기본 ActiveX 편집. AutoCAD와 토큰/스냅샷 분리. 해치·문서 간 복사·XREF·배치 편집·PDF 출력·스크립트·RGB는 아직 지원하지 않음.",
+            ApplyOpsSchema("gstarcad", "activate_document, regen_document, set_layer_visibility, set_layer_color(ACI), move_entities, rotate_entities, set_text_value, zoom_window, draw_entities(line/text/mtext/lwpolyline/circle/arc/ellipse/point/dim_aligned/dim_rotated), copy_entities, scale_entities, mirror_entities, offset_entities, set_entity_properties, set_block_attributes / 고위험: save_document, delete_entities, delete_entities_in_bounds, delete_entities_from_index"),
+            a => host.ApplyOps("gstarcad", a)));
+        _tools.Add(new("gstarcad_launch", "명시 요청 시 GstarCAD만 실행하고 표시. 기존 인스턴스 우선, AutoCAD 실행/연결 없음.",
+            new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["template"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("gcad.dwt", "gcadiso.dwt") },
+                },
+            }, a => host.CadLaunch(a, "gstarcad")));
     }
 
     public IReadOnlyList<ToolDef> All => _tools;
@@ -820,7 +880,8 @@ public sealed class ToolRegistry
             var readOnly = t.Name is "core_ping" or "core_get_status" or "core_get_capabilities" or "core_list_snapshots"
                 or "excel_get_active_context" or "excel_read_range" or "excel_inspect"
                 or "hwp_plan_creation" or "hwp_get_active_context" or "hwp_read_text" or "hwp_doctor" or "hwp_get_job"
-                or "cad_get_active_context" or "cad_query_entities";
+                or "cad_get_active_context" or "cad_query_entities"
+                or "gstarcad_get_active_context" or "gstarcad_query_entities";
             var destructive = t.Name.EndsWith("_apply_ops", StringComparison.Ordinal)
                               || t.Name is "core_restore_snapshot" or "hwp_repair_typelib" or "hwp_submit_ops";
             arr.Add(new JsonObject

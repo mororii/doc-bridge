@@ -14,6 +14,11 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
 {
     public string App => "fake";
 
+    private static readonly HashSet<string> ExactCadExecuteOps = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "set_text_value", "set_layer_visibility", "set_layer_color", "regen_document",
+    };
+
     /// <summary>시트명 → (셀주소 → 값)</summary>
     public Dictionary<string, Dictionary<string, string>> Sheets = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -30,6 +35,25 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
     public string DocumentRef { get; set; } = "fake-document";
     public int PreviewCallCount { get; private set; }
     public int StatusCallCount { get; private set; }
+    public int ApplyCallCount { get; private set; }
+    public int CaptureSnapshotCallCount { get; private set; }
+    public int ValidatePreviewReuseCallCount { get; private set; }
+    public bool FailNextApply { get; set; }
+    public bool ForceHighRiskPreview { get; set; }
+    public bool OmitApplyReadback { get; set; }
+    public bool OmitSnapshotDocumentRef { get; set; }
+    public bool ThrowOnGetStatus { get; set; }
+    public bool ThrowOnPreview { get; set; }
+    public bool ThrowOnCaptureSnapshot { get; set; }
+    public string? SnapshotDocumentOverride { get; set; }
+    public string? LastPreviewedDocumentRef { get; private set; }
+    public string? LastMutatedDocumentRef { get; private set; }
+    public string? SwitchDocumentRefAfterStatus { get; set; }
+    public string? SwitchDocumentRefAfterPreview { get; set; }
+    public Dictionary<string, bool> LayerVisibility { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, int> LayerColor { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, string> EntityText { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public int RegenCount { get; private set; }
 
     public JsonObject CaptureState()
     {
@@ -61,7 +85,16 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
     public AdapterStatus GetStatus()
     {
         StatusCallCount++;
-        return new(true, true, "fake", "1.0", DocumentRef, "in-memory adapter");
+        if (ThrowOnGetStatus)
+            throw new InvalidOperationException("fake GetStatus failed after journal start");
+        var current = DocumentRef;
+        var status = new AdapterStatus(true, true, "fake", "1.0", current, "in-memory adapter");
+        if (SwitchDocumentRefAfterStatus is { } next)
+        {
+            DocumentRef = next;
+            SwitchDocumentRefAfterStatus = null;
+        }
+        return status;
     }
 
     public JsonObject GetCapabilities() => new()
@@ -70,7 +103,9 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
         ["automation"] = "in-memory",
         ["directAppControl"] = false,
         ["readOps"] = new JsonArray("context", "range"),
-        ["writeOps"] = new JsonArray("set_values", "find_replace", "insert_text", "append_text", "insert_before_text", "insert_after_text", "delete_entities"),
+        ["writeOps"] = new JsonArray(
+            "set_values", "find_replace", "insert_text", "append_text", "insert_before_text", "insert_after_text",
+            "set_text_value", "set_layer_visibility", "set_layer_color", "regen_document", "delete_entities"),
         ["limits"] = new JsonObject(),
     };
 
@@ -148,13 +183,30 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
     public ApplyPreview Preview(IReadOnlyList<JsonObject> ops)
     {
         PreviewCallCount++;
+        if (ThrowOnPreview)
+            throw new InvalidOperationException("fake Preview failed after journal start");
+        // CAD-like: mutate/inspect the active document. op.document is ignored
+        // except activate_document, matching CadAdapter.Preview + ActiveDocWait.
+        LastPreviewedDocumentRef = DocumentRef;
         var p = new ApplyPreview();
+        if (ForceHighRiskPreview) p.RequiresHighRiskApproval = true;
         var maxDiff = 100;
         foreach (var op in ops)
         {
             var name = Json.GetString(op, "op")!;
+            if (!string.Equals(name, "activate_document", StringComparison.OrdinalIgnoreCase) &&
+                ExplicitTargetMismatch(op) is { } previewMismatch)
+            {
+                p.Errors.Add(previewMismatch);
+                continue;
+            }
             switch (name)
             {
+                case "activate_document":
+                    DocumentRef = Json.GetString(op, "document") ?? DocumentRef;
+                    LastPreviewedDocumentRef = DocumentRef;
+                    p.Affected.Add(new AffectedRef("document", DocumentRef));
+                    break;
                 case "set_values":
                 {
                     var range = Json.GetString(op, "range")!;
@@ -240,7 +292,24 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
                     p.Affected.Add(new AffectedRef("entities", $"{handles.Count} entities"));
                     break;
                 }
+                case "set_layer_visibility":
+                    p.Affected.Add(new AffectedRef("layer", Json.GetString(op, "layer") ?? ""));
+                    break;
+                case "set_layer_color":
+                    p.Affected.Add(new AffectedRef("layer-color", Json.GetString(op, "layer") ?? ""));
+                    break;
+                case "set_text_value":
+                    p.Affected.Add(new AffectedRef("text", Json.GetString(op, "handle") ?? ""));
+                    break;
+                case "regen_document":
+                    p.Affected.Add(new AffectedRef("view", "regen"));
+                    break;
             }
+        }
+        if (SwitchDocumentRefAfterPreview is { } next)
+        {
+            DocumentRef = next;
+            SwitchDocumentRefAfterPreview = null;
         }
         return p;
     }
@@ -254,6 +323,8 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
 
     public ApplyExecution Apply(IReadOnlyList<JsonObject> ops, string snapshotId)
     {
+        ApplyCallCount++;
+        LastMutatedDocumentRef = DocumentRef;
         var exec = new ApplyExecution { Ok = true };
         var checkedCount = 0;
         var mismatches = new List<string>();
@@ -261,6 +332,12 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
         foreach (var op in ops)
         {
             var name = Json.GetString(op, "op")!;
+            if (!string.Equals(name, "activate_document", StringComparison.OrdinalIgnoreCase) &&
+                ExplicitTargetMismatch(op) is { } applyMismatch)
+            {
+                mismatches.Add(applyMismatch);
+                continue;
+            }
             switch (name)
             {
                 case "set_values":
@@ -400,15 +477,59 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
                     exec.Warnings.Add("fake adapter: delete_entities is a no-op (high-risk flow exercised)");
                     break;
                 }
+                case "activate_document":
+                    DocumentRef = Json.GetString(op, "document") ?? DocumentRef;
+                    LastMutatedDocumentRef = DocumentRef;
+                    exec.Affected.Add(new AffectedRef("document", DocumentRef));
+                    checkedCount++;
+                    break;
+                case "set_layer_visibility":
+                {
+                    var layer = Json.GetString(op, "layer") ?? "";
+                    LayerVisibility[layer] = Json.GetBool(op, "visible");
+                    exec.Affected.Add(new AffectedRef("layer", layer));
+                    checkedCount++;
+                    break;
+                }
+                case "set_layer_color":
+                {
+                    var layer = Json.GetString(op, "layer") ?? "";
+                    LayerColor[layer] = Json.GetInt(op, "color") ?? 7;
+                    exec.Affected.Add(new AffectedRef("layer-color", layer));
+                    checkedCount++;
+                    break;
+                }
+                case "set_text_value":
+                {
+                    var handle = Json.GetString(op, "handle") ?? "";
+                    EntityText[handle] = Json.GetString(op, "text") ?? "";
+                    exec.Affected.Add(new AffectedRef("text", handle));
+                    checkedCount++;
+                    break;
+                }
+                case "regen_document":
+                    RegenCount++;
+                    exec.Affected.Add(new AffectedRef("view", "regen"));
+                    checkedCount++;
+                    break;
             }
         }
 
-        exec.Readback = new JsonObject
+        if (FailNextApply)
         {
-            ["verified"] = mismatches.Count == 0,
-            ["checked"] = checkedCount,
-            ["mismatches"] = Json.ToArray(mismatches),
-        };
+            FailNextApply = false;
+            mismatches.Add("intentional apply failure");
+        }
+
+        if (!OmitApplyReadback)
+        {
+            exec.Readback = new JsonObject
+            {
+                ["verified"] = mismatches.Count == 0,
+                ["checked"] = checkedCount,
+                ["mismatches"] = Json.ToArray(mismatches),
+            };
+        }
         exec.Ok = mismatches.Count == 0;
         if (mismatches.Count > 0) exec.Errors.AddRange(mismatches);
         return exec;
@@ -416,14 +537,37 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
 
     public void CaptureSnapshot(string snapshotDir, JsonObject metadata, IReadOnlyList<JsonObject>? ops = null)
     {
+        CaptureSnapshotCallCount++;
+        if (ThrowOnCaptureSnapshot)
+            throw new InvalidOperationException("fake CaptureSnapshot failed after journal start");
         var state = CaptureState();
+        if (ops is { Count: > 0 })
+        {
+            foreach (var op in ops)
+            {
+                if (ExplicitTargetMismatch(op) is { } mismatch)
+                    throw new InvalidOperationException(mismatch);
+            }
+        }
         File.WriteAllText(Path.Combine(snapshotDir, "state.json"), state.ToJsonString(Json.Pretty));
         metadata["payload"] = "state.json";
+        // CAD CaptureSnapshot writes the ActiveDoc identity, not the op.document header.
+        if (OmitSnapshotDocumentRef)
+            metadata.Remove("documentRef");
+        else
+            metadata["documentRef"] = SnapshotDocumentOverride ?? DocumentRef;
+        if (ops is { Count: > 0 } &&
+            ops.All(op => ExactCadExecuteOps.Contains(Json.GetString(op, "op") ?? "")))
+        {
+            metadata["snapshotCoverage"] = "complete";
+            metadata["snapshotKind"] = "operation-scoped";
+        }
     }
 
     public JsonObject ValidatePreviewReuse(
         string snapshotDir, JsonObject metadata, IReadOnlyList<JsonObject> ops)
     {
+        ValidatePreviewReuseCallCount++;
         var statePath = Path.Combine(snapshotDir, "state.json");
         if (!File.Exists(statePath))
             return new JsonObject { ["ok"] = true, ["reusable"] = false, ["reason"] = "snapshot state missing" };
@@ -459,6 +603,8 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
         {
             ["ok"] = true,
             ["restored"] = true,
+            ["coverage"] = Json.GetString(metadata, "snapshotCoverage"),
+            ["kind"] = Json.GetString(metadata, "snapshotKind"),
             ["readback"] = new JsonObject
             {
                 ["verified"] = afterHash == snapshotHash,
@@ -466,6 +612,31 @@ public sealed class FakeAdapter : IAppAdapter, IPreviewReuseAdapter
                 ["afterHash"] = afterHash,
             },
         };
+    }
+
+    private string? ExplicitTargetMismatch(JsonObject op)
+    {
+        var workbook = Json.GetString(op, "targetWorkbook") ?? Json.GetString(Json.GetObj(op, "target"), "workbook");
+        if (!string.IsNullOrWhiteSpace(workbook) &&
+            !DocBridgeHost.SameDocumentRef("excel", workbook, DocumentRef))
+            return $"explicit target '{workbook}' does not match active document '{DocumentRef}'; no auto activation";
+
+        var document = Json.GetString(op, "document");
+        if (!string.IsNullOrWhiteSpace(document) &&
+            !DocBridgeHost.SameDocumentRef("cad", document, DocumentRef))
+            return $"op.document '{document}' does not match the document actually used; no auto activation";
+
+        var documentRef = Json.GetString(op, "documentRef");
+        if (!string.IsNullOrWhiteSpace(documentRef) &&
+            !DocBridgeHost.SameDocumentRef("hwp", documentRef, DocumentRef))
+            return $"documentRef '{documentRef}' does not match active document '{DocumentRef}'; no auto activation";
+
+        var file = Json.GetString(op, "file");
+        if (!string.IsNullOrWhiteSpace(file) &&
+            !DocBridgeHost.SameDocumentRef("hwp", file, DocumentRef))
+            return $"file '{file}' does not match active document '{DocumentRef}'; no auto activation";
+
+        return null;
     }
 
     public void Dispose() { }

@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text.Json.Nodes;
 using DocBridge.Core.Adapters;
 using DocBridge.Core.Models;
@@ -10,6 +9,8 @@ namespace DocBridge.Core.Tests;
 /// 실한글 E2E (M2 인수 조건): DOCBRIDGE_E2E=1 일 때만 실행.
 /// 한글 인스턴스는 어댑터 STA 스레드 안에서 생성(팩토리 패턴)해
 /// 크로스-아파트먼트 COM 마샬링을 원천 배제한다.
+/// 문서 변경 전에 새 프로세스 또는 격리 탭 소유권을 증명하고,
+/// 정리 시 소유한 문서만 FileClose 한다. process.Kill / XHwpWindows.Close 는 사용하지 않는다.
 /// </summary>
 public class HwpE2ETests : IDisposable
 {
@@ -20,15 +21,13 @@ public class HwpE2ETests : IDisposable
     private HwpAdapter? _adapter;
     private object? _createdApp;
     private int _createdProcessId;
+    private HwpE2EOwnershipClaim? _ownership;
+    private bool _sessionReleased;
+    private bool _adapterDisposed;
 
     private DocBridgeHost CreateHostWithHwp()
     {
-        var existingProcessIds = Process.GetProcessesByName("Hwp")
-            .Select(process =>
-            {
-                using (process) return process.Id;
-            })
-            .ToHashSet();
+        var existingProcessIds = HwpE2EOwnership.CurrentHwpProcessIds();
         _adapter = new HwpAdapter(() =>
         {
             // 어댑터 STA 스레드 안에서 실행됨 (RCW 생성/사용 아파트먼트 일치)
@@ -40,38 +39,41 @@ public class HwpE2ETests : IDisposable
             // FontCache initialization even though the production path is healthy.
             dynamic hwp = HwpEnvironmentDoctor.RunWithAutomationWorkingDirectory(
                 () => Activator.CreateInstance(type)!)!;
-            // 기존 한글 프로세스가 남아 있어도 E2E는 항상 별도의 빈 문서 탭에서 시작한다.
-            try { hwp.HAction.Run("FileNew"); } catch { }
-            try
+
+            var beforeOk = HwpE2EOwnership.TryReadInventory(hwp, out HwpE2EDocumentSnapshot before);
+            var windowProcessId = RotHelper.ProcessIdFromWindowHandle(RotHelper.HwpWindowHandle(hwp));
+            var processId = HwpE2EOwnershipPolicy.ResolveProcessId(
+                windowProcessId, existingProcessIds, HwpE2EOwnership.CurrentHwpProcessIds());
+            bool fileNewSucceeded = HwpE2EOwnership.TryFileNew(hwp);
+            var afterOk = HwpE2EOwnership.TryReadInventory(hwp, out HwpE2EDocumentSnapshot after);
+            if (!HwpE2EOwnershipPolicy.TryProve(
+                    existingProcessIds,
+                    processId,
+                    fileNewSucceeded,
+                    beforeOk ? before : null,
+                    afterOk ? after : HwpE2EDocumentSnapshot.Empty,
+                    out HwpE2EOwnershipClaim claim,
+                    out string error))
             {
-                hwp.HAction.Run("MoveDocBegin");
-                if (!(bool)hwp.IsEmpty)
-                {
-                    hwp.HAction.Run("SelectAll");
-                    hwp.HAction.Run("Delete");
-                }
+                string createdId = "";
+                if (fileNewSucceeded && beforeOk && afterOk &&
+                    HwpE2EOwnershipPolicy.TryIdentifyCreatedTab(before, after, out createdId))
+                    HwpE2EOwnership.TryCloseDocumentById(hwp, createdId);
+                throw new InvalidOperationException(error);
             }
-            catch { }
-            dynamic act = hwp.HAction;
-            dynamic ps = hwp.HParameterSet.HInsertText;
-            act.GetDefault("InsertText", ps.HSet);
-            ps.Text = "사과 가격은 1000원, 배 가격은 2000원입니다. 사과 재고 확인 필요.";
-            act.Execute("InsertText", ps.HSet);
+
+            _ownership = claim;
             _createdApp = hwp;
-            _createdProcessId = RotHelper.ProcessIdFromWindowHandle(RotHelper.HwpWindowHandle(hwp));
-            if (_createdProcessId == 0)
-            {
-                _createdProcessId = Process.GetProcessesByName("Hwp")
-                    .Select(process =>
-                    {
-                        using (process) return process.Id;
-                    })
-                    .FirstOrDefault(id => !existingProcessIds.Contains(id));
-            }
+            _createdProcessId = claim.ProcessId;
+            HwpE2EOwnership.InsertSeedText(hwp, HwpE2EOwnershipPolicy.SeedText);
             return (object)hwp;
         });
         var host = new DocBridgeHost(_home.Options);
-        host.Router.Register("hwp", _adapter);
+        host.Router.Register("hwp", new HwpE2ESafeAdapter(_adapter, () =>
+        {
+            ReleaseOwnedSession();
+            _adapterDisposed = true;
+        }));
         return host;
     }
 
@@ -287,7 +289,12 @@ public class HwpE2ETests : IDisposable
     {
         if (!Enabled) return;
         using var host = CreateHostWithHwp();
-        var first = host.HwpLaunch(new JsonObject { ["newDocument"] = true });
+        JsonObject? first = null;
+        TryRecordExactCreatedDocuments(() =>
+        {
+            first = host.HwpLaunch(new JsonObject { ["newDocument"] = true });
+        });
+        Assert.NotNull(first);
         Assert.True(Json.GetBool(first, "ok"), $"first hwp_launch failed: {first}");
         Assert.True(Json.GetBool(Json.GetObj(first, "summary"), "createdDocument"));
         var firstRef = Json.GetString(first, "documentRef");
@@ -310,7 +317,12 @@ public class HwpE2ETests : IDisposable
         var firstRef = Json.GetString(firstContext, "documentRef");
         Assert.False(string.IsNullOrWhiteSpace(firstRef));
 
-        var launch = host.HwpLaunch(new JsonObject { ["newDocument"] = true });
+        JsonObject? launch = null;
+        TryRecordExactCreatedDocuments(() =>
+        {
+            launch = host.HwpLaunch(new JsonObject { ["newDocument"] = true });
+        });
+        Assert.NotNull(launch);
         Assert.True(Json.GetBool(launch, "ok"), $"second document launch failed: {launch}");
         var secondRef = Json.GetString(launch, "documentRef");
         Assert.False(string.IsNullOrWhiteSpace(secondRef));
@@ -1187,46 +1199,197 @@ public class HwpE2ETests : IDisposable
         }
     }
 
+    [Fact]
+    public void Hwp_ordinary_execute_and_uuid_replay()
+    {
+        if (!Enabled) return;
+        using var host = CreateHostWithHwp();
+
+        var ctx = host.GetActiveContext("hwp");
+        Assert.True(Json.GetBool(ctx, "ok"), ctx.ToJsonString());
+        var documentRef = Json.GetString(ctx, "documentRef");
+        Assert.False(string.IsNullOrWhiteSpace(documentRef));
+        Assert.NotNull(_ownership);
+        Assert.True(HwpE2EOwnershipPolicy.AllowsDocumentMutation(_ownership));
+
+        const string sentinel = "HWP-EXECUTE-SENTINEL";
+        var requestId = Guid.NewGuid().ToString("D");
+        var ops = new JsonArray(new JsonObject
+        {
+            ["op"] = "append_text",
+            ["text"] = sentinel,
+            ["documentRef"] = documentRef,
+        });
+
+        JsonObject Execute() => host.ApplyOps("hwp", new JsonObject
+        {
+            ["executionMode"] = "execute",
+            ["requestId"] = requestId,
+            ["expectedDocumentRef"] = documentRef,
+            ["ops"] = ops.DeepClone(),
+        });
+
+        JsonObject ReadBound() => host.Read("hwp", new JsonObject
+        {
+            ["documentRef"] = documentRef,
+            ["scope"] = "document",
+        });
+
+        var first = Execute();
+        if (Json.GetBool(first, "dryRun") ||
+            (Json.GetArr(first, "errors")?.ToJsonString() ?? "").Contains("confirmToken", StringComparison.OrdinalIgnoreCase))
+            Assert.Fail("Hwp ordinary execute requires Host executionMode=execute; token/dry-run fallback is not this fixture. " + first.ToJsonString());
+        Assert.True(Json.GetBool(first, "ok"), first.ToJsonString());
+
+        var afterFirst = ReadBound();
+        Assert.True(Json.GetBool(afterFirst, "ok"), afterFirst.ToJsonString());
+        Assert.Equal(documentRef, Json.GetString(afterFirst, "documentRef"));
+        var firstText = Json.GetString(afterFirst, "text") ?? "";
+        Assert.Equal(1, CountOccurrences(firstText, sentinel));
+
+        var replay = Execute();
+        Assert.True(Json.GetBool(replay, "ok"), replay.ToJsonString());
+        Assert.True(Json.GetBool(replay, "idempotentReplay"), replay.ToJsonString());
+        var afterReplay = ReadBound();
+        Assert.True(Json.GetBool(afterReplay, "ok"), afterReplay.ToJsonString());
+        Assert.Equal(documentRef, Json.GetString(afterReplay, "documentRef"));
+        var replayText = Json.GetString(afterReplay, "text") ?? "";
+        Assert.Equal(1, CountOccurrences(replayText, sentinel));
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        for (var index = 0; (index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0; index += value.Length)
+            count++;
+        return count;
+    }
+
     public void Dispose()
     {
-        if (_adapter is not null && _createdApp is not null)
+        ReleaseOwnedSession();
+        if (!_adapterDisposed)
         {
-            try
-            {
-                _adapter.RunOnAdapterThread<object?>(() =>
-                {
-                    try
-                    {
-                        dynamic hwp = _createdApp;
-                        try { hwp.Clear(1); } catch { }
-                        try { hwp.XHwpWindows.Close(false); } catch { }
-                    }
-                    catch { }
-                    return null;
-                });
-            }
-            catch { }
+            HwpE2EOwnership.DisposeAdapterWithoutKilling(_adapter);
+            _adapterDisposed = true;
         }
-        _adapter?.Dispose();
+        _adapter = null;
         _createdApp = null;
-        if (_createdProcessId > 0)
-        {
-            try
-            {
-                using var process = Process.GetProcessById(_createdProcessId);
-                if (!process.WaitForExit(1500) &&
-                    string.Equals(process.ProcessName, "Hwp", StringComparison.OrdinalIgnoreCase))
-                {
-                    process.Kill(entireProcessTree: false);
-                    process.WaitForExit(5000);
-                }
-            }
-            catch (ArgumentException) { }
-            catch (InvalidOperationException) { }
-        }
         _createdProcessId = 0;
         GC.Collect();
         GC.WaitForPendingFinalizers();
         _home.Dispose();
+    }
+
+    private void ReleaseOwnedSession()
+    {
+        if (_sessionReleased) return;
+        _sessionReleased = true;
+        RetainOwnedArtifacts();
+        CloseOwnedDocuments();
+    }
+
+    private void RetainOwnedArtifacts()
+    {
+        var artifactDir = Environment.GetEnvironmentVariable("DOCBRIDGE_E2E_ARTIFACTS");
+        if (!HwpE2EOwnershipPolicy.ShouldRetainArtifacts(artifactDir)) return;
+        if (_adapter is null || _createdApp is null || !HwpE2EOwnershipPolicy.AllowsDocumentMutation(_ownership))
+            return;
+
+        try
+        {
+            if (Directory.Exists(_home.Dir))
+                HwpE2EOwnership.CopyArtifacts(artifactDir!, Directory.EnumerateFiles(_home.Dir, "*.pdf"));
+
+            var seededId = _ownership!.SeededDocumentId;
+            if (string.IsNullOrWhiteSpace(seededId) ||
+                !_ownership.OwnedDocumentIds.Contains(seededId, StringComparer.Ordinal))
+            {
+                Console.Error.WriteLine("HwpE2E: skipped HWP artifact retain; seeded owned document is unknown.");
+                return;
+            }
+
+            var path = HwpE2EOwnershipPolicy.UniqueOwnedHwpArtifactPath(artifactDir!, seededId);
+            var saved = _adapter.RunOnAdapterThread(() =>
+                HwpE2EOwnership.TrySaveDocumentById(_createdApp, seededId, path));
+            Console.Error.WriteLine(saved
+                ? "HwpE2E: retained HWP artifact: " + path
+                : "HwpE2E: failed to retain HWP artifact: " + path);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("HwpE2E: artifact retain reported: " + ex.Message);
+        }
+    }
+
+    private void CloseOwnedDocuments()
+    {
+        if (_adapter is null || _createdApp is null) return;
+        try
+        {
+            _adapter.RunOnAdapterThread<object?>(() =>
+            {
+                Console.Error.WriteLine(
+                    $"HwpE2E: closing owned session pid={_createdProcessId} mode={_ownership?.Mode}");
+                dynamic hwp = _createdApp;
+                IReadOnlyList<string>? current = HwpE2EOwnership.TryReadInventory(hwp, out HwpE2EDocumentSnapshot inventory)
+                    ? inventory.DocumentIds
+                    : null;
+                var plan = HwpE2EOwnershipPolicy.PlanCleanup(_ownership, current);
+                if (plan.AllowProcessKill || plan.AllowCloseAllWindows)
+                    throw new InvalidOperationException("HWP E2E cleanup plan attempted forbidden process kill or XHwpWindows.Close.");
+                if (plan.RetainUnknownState)
+                {
+                    Console.Error.WriteLine("HwpE2E: " + plan.Reason);
+                    return null;
+                }
+
+                foreach (var documentId in plan.DocumentIdsToClose)
+                {
+                    if (!HwpE2EOwnership.TryCloseDocumentById(hwp, documentId))
+                        Console.Error.WriteLine("HwpE2E: FileClose failed for owned document " + documentId);
+                }
+
+                if (plan.RetainedUnknownDocumentIds.Count > 0)
+                    Console.Error.WriteLine("HwpE2E: retained unknown tabs: " +
+                                           string.Join(", ", plan.RetainedUnknownDocumentIds));
+
+                return null;
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("HwpE2E: owned FileClose reported: " + ex.Message);
+        }
+    }
+
+    private bool TryRecordExactCreatedDocuments(Action work)
+    {
+        if (_adapter is null || _createdApp is null || _ownership is null) return false;
+        var beforeOk = false;
+        var afterOk = false;
+        var before = HwpE2EDocumentSnapshot.Empty;
+        var after = HwpE2EDocumentSnapshot.Empty;
+        _adapter.RunOnAdapterThread<object?>(() =>
+        {
+            beforeOk = HwpE2EOwnership.TryReadInventory(_createdApp, out before);
+            return null;
+        });
+        work();
+        _adapter.RunOnAdapterThread<object?>(() =>
+        {
+            afterOk = HwpE2EOwnership.TryReadInventory(_createdApp, out after);
+            return null;
+        });
+        if (!beforeOk || !afterOk ||
+            !HwpE2EOwnershipPolicy.TryCaptureCreatedDocumentIds(before, after, out var created))
+        {
+            Console.Error.WriteLine("HwpE2E: could not capture exact created tab IDs; unknown tabs will be retained.");
+            return false;
+        }
+
+        _ownership = HwpE2EOwnershipPolicy.WithAdditionalOwnedDocuments(_ownership, created);
+        Console.Error.WriteLine("HwpE2E: recorded owned documents: " + string.Join(",", created));
+        return true;
     }
 }
