@@ -289,10 +289,43 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
         }
     }
 
+    internal const string DocumentTextReadFailedCode = "HWP_DOCUMENT_TEXT_READ_FAILED";
+
+    /// <summary>
+    /// Whole-document body text.
+    ///
+    /// A failure to read is raised, never reported as an empty document. The previous
+    /// implementation caught every exception and returned "", which every caller then
+    /// consumed as a successful read of a document that happens to be empty:
+    /// <c>Read</c> answered <c>ok=true, length=0</c>, <c>GetActiveContext</c> answered
+    /// <c>textLength=0</c>, and preview/verification compared against "". A genuinely
+    /// empty document and a failed <c>GetTextFile</c> call were indistinguishable.
+    ///
+    /// A null or empty return from <c>GetTextFile</c> is still a success and still
+    /// yields "": an empty document is a legitimate state. Only an actual exception —
+    /// from the COM call or from decoding what it returned — becomes
+    /// <see cref="DocumentTextReadFailedCode"/>, which the existing read / preview /
+    /// context error plumbing turns into a failed result.
+    ///
+    /// Selection text is deliberately unchanged: an empty selection is the normal case
+    /// and <see cref="GetSelectionText"/> keeps its tolerant behavior.
+    /// </summary>
     private static string GetDocText(dynamic hwp)
     {
-        try { return DecodeHwpSerializedText((string)(hwp.GetTextFile("TEXT", "") ?? "")); }
-        catch { return ""; }
+        try
+        {
+            return DecodeHwpSerializedText((string)(hwp.GetTextFile("TEXT", "") ?? ""));
+        }
+        catch (HwpAutomationException) { throw; }
+        catch (Exception ex)
+        {
+            throw new HwpAutomationException(
+                DocumentTextReadFailedCode,
+                $"한글 문서 본문을 읽지 못했습니다: {ex.Message}. " +
+                "읽지 못한 본문을 빈 문서로 보고하지 않습니다.",
+                "한글 창과 문서가 응답하는지 확인한 뒤 다시 시도하세요.",
+                ex);
+        }
     }
 
     private static HwpAutomationException HwpUiInitializationException(HwpUiFailure failure) =>
@@ -1475,7 +1508,19 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
                     ["selectionPreview"] = selText[..Math.Min(200, selText.Length)],
                 };
             }
-            catch (Exception ex) { r.Errors.Add($"hwp context failed: {ex.Message}"); }
+            catch (HwpAutomationException ex)
+            {
+                // Ok was set true as soon as an app and document were found. Anything
+                // that fails after that point invalidates the context; leaving Ok=true
+                // beside an error would let a caller act on a half-read document.
+                r.Ok = false;
+                r.Errors.Add($"hwp context failed [{ex.Code}]: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                r.Ok = false;
+                r.Errors.Add($"hwp context failed: {ex.Message}");
+            }
             finally { r.Interaction = foreground.Complete(); }
             return r;
         });

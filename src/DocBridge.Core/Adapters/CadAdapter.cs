@@ -3492,7 +3492,109 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
-    private static string? CadOperationStateHash(dynamic doc, IReadOnlyList<JsonObject> ops)
+    /// <summary>
+    /// Test seam: the exact geometry payload the fingerprint feeds into the v2 state.
+    /// Exposed so a regression test can build the pre-deduplication suffix from the
+    /// same JSON the production path uses. Behaviorally identical to the inline call.
+    /// </summary>
+    internal static JsonObject CadEntityGeometryForFingerprint(object entity) =>
+        EntityJson(entity, -1, includeGeometry: true);
+
+    /// <summary>
+    /// Appends the v2 legacy per-entity suffix.
+    ///
+    /// Before deduplication this suffix reread EntityName, Layer, TextString, Height,
+    /// Rotation, InsertionPoint and GetBoundingBox natively, even though
+    /// <see cref="EntityJson"/> had just read the same properties to build
+    /// <paramref name="geometry"/>. Those values are now reused, producing the same
+    /// bytes in the same order.
+    ///
+    /// Failure semantics are preserved rather than approximated. The old code appended
+    /// nothing when a read threw; EntityJson records an unreadable string as "" and
+    /// omits an unreadable number or point entirely, and appending "" or null to a
+    /// StringBuilder also appends nothing. When a field is absent from
+    /// <paramref name="geometry"/> the original native read is still performed, so a
+    /// shape this method does not recognise degrades to the previous behavior instead
+    /// of silently emitting a different digest.
+    /// </summary>
+    internal static void AppendEntityStateSuffix(StringBuilder state, JsonObject geometry, object entityObject)
+    {
+        dynamic entity = entityObject;
+
+        if (geometry.ContainsKey("type")) state.Append(Json.GetString(geometry, "type"));
+        else { try { state.Append((string)entity.EntityName); } catch { } }
+        state.Append('|');
+
+        if (geometry.ContainsKey("layer")) state.Append(Json.GetString(geometry, "layer"));
+        else { try { state.Append((string)entity.Layer); } catch { } }
+        state.Append('|');
+
+        // TextOf never throws and never returns null, so the old code appended it
+        // unconditionally. EntityJson stores it for every text-like entity, which is
+        // the only kind that reaches this suffix.
+        if (geometry.ContainsKey("text")) state.Append(Json.GetString(geometry, "text"));
+        else state.Append(TextOf(entity));
+        state.Append('|');
+
+        if (TryReadCapturedDouble(geometry, "height", out var height))
+            state.Append(height.ToString("R", CultureInfo.InvariantCulture));
+        else
+        {
+            try { state.Append(Convert.ToDouble(entity.Height, CultureInfo.InvariantCulture).ToString("R", CultureInfo.InvariantCulture)); } catch { }
+        }
+        state.Append('|');
+
+        if (TryReadCapturedDouble(geometry, "rotation", out var rotation))
+            state.Append(rotation.ToString("R", CultureInfo.InvariantCulture));
+        else
+        {
+            try { state.Append(Convert.ToDouble(entity.Rotation, CultureInfo.InvariantCulture).ToString("R", CultureInfo.InvariantCulture)); } catch { }
+        }
+        state.Append('|');
+
+        // EntityJson stored the result of the same PointJson call, so re-serializing
+        // that node reproduces the old text exactly.
+        if (geometry["insertionPoint"] is JsonArray insertionPoint) state.Append(insertionPoint.ToJsonString());
+        else
+        {
+            try { state.Append(PointJson((object?)entity.InsertionPoint).ToJsonString()); } catch { }
+        }
+        state.Append('|');
+
+        if (geometry["bounds"] is JsonObject bounds
+            && TryReadCapturedDouble(bounds, "minX", out var minX)
+            && TryReadCapturedDouble(bounds, "minY", out var minY)
+            && TryReadCapturedDouble(bounds, "maxX", out var maxX)
+            && TryReadCapturedDouble(bounds, "maxY", out var maxY))
+        {
+            AppendBoundingBox(state, minX, minY, maxX, maxY);
+        }
+        else if (TryBoundingBox(entityObject, out var readMinX, out var readMinY, out var readMaxX, out var readMaxY))
+        {
+            AppendBoundingBox(state, readMinX, readMinY, readMaxX, readMaxY);
+        }
+    }
+
+    /// <summary>
+    /// Reads a double back out of a captured JSON node. EntityJson stores these as
+    /// doubles, so this returns the same bits the native read produced; it never
+    /// reparses serialized text.
+    /// </summary>
+    private static bool TryReadCapturedDouble(JsonObject source, string key, out double value)
+    {
+        value = 0;
+        return source.TryGetPropertyValue(key, out var node)
+            && node is JsonValue jv
+            && jv.TryGetValue<double>(out value);
+    }
+
+    private static void AppendBoundingBox(StringBuilder state, double minX, double minY, double maxX, double maxY) =>
+        state.Append(minX.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+            .Append(minY.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+            .Append(maxX.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+            .Append(maxY.ToString("R", CultureInfo.InvariantCulture));
+
+    internal static string? CadOperationStateHash(dynamic doc, IReadOnlyList<JsonObject> ops)
     {
         var state = new StringBuilder(4096);
         string documentName = "";
@@ -3555,21 +3657,9 @@ public sealed partial class CadAdapter : ComAdapterBase, IPreviewReuseAdapter
                 if (geometry["bounds"] is null || geometry["height"] is null || geometry["rotation"] is null ||
                     geometry["insertionPoint"] is null) return null;
                 state.Append(geometry.ToJsonString()).Append('|');
-                try { state.Append((string)entity.EntityName); } catch { }
-                state.Append('|');
-                try { state.Append((string)entity.Layer); } catch { }
-                state.Append('|').Append(TextOf(entity)).Append('|');
-                try { state.Append(Convert.ToDouble(entity.Height, CultureInfo.InvariantCulture).ToString("R", CultureInfo.InvariantCulture)); } catch { }
-                state.Append('|');
-                try { state.Append(Convert.ToDouble(entity.Rotation, CultureInfo.InvariantCulture).ToString("R", CultureInfo.InvariantCulture)); } catch { }
-                state.Append('|');
-                try { state.Append(PointJson((object?)entity.InsertionPoint).ToJsonString()); } catch { }
-                state.Append('|');
-                if (TryBoundingBox((object)entity, out var minX, out var minY, out var maxX, out var maxY))
-                    state.Append(minX.ToString("R", CultureInfo.InvariantCulture)).Append(',')
-                        .Append(minY.ToString("R", CultureInfo.InvariantCulture)).Append(',')
-                        .Append(maxX.ToString("R", CultureInfo.InvariantCulture)).Append(',')
-                        .Append(maxY.ToString("R", CultureInfo.InvariantCulture));
+                // The suffix below used to reread seven properties EntityJson had just
+                // read. It now reuses them; the emitted bytes are unchanged.
+                AppendEntityStateSuffix(state, geometry, (object)entity);
             }
             catch { return null; }
             state.Append('\n');

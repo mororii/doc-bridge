@@ -339,6 +339,90 @@ DocBridge가 만든 저장된 통합문서는 `excel_disconnect`와 worker 파�
 남는 것이 관측되었다. 잔류 프로세스가 해결되었다고 보지 않는다. 사용자가 연 Excel은
 강제 종료하지 않는다.
 
+## 스냅샷 보조 workbook 사본
+
+스냅샷 디렉터리에는 `state.json`과 별도로 **보조 workbook 사본**이 남는다. 자동 롤백은 `state.json`의 operation-scoped 상태가 담당하며, 이 사본을 읽어 자동 복원하는 경로는 없다. 운영자가 사후에 참고하는 증거 파일이다.
+
+기본값은 마지막으로 저장된 디스크 파일 복사다. 저장 전 변경이 있는 workbook이라면 그 변경은 사본에 없다. 사본이 최신인지는 추측하지 말고 metadata를 읽는다.
+
+| metadata 키 | 뜻 |
+|---|---|
+| `workbookBackupSource` | `last-saved-file`(기본) / `current-memory-savecopyas`(opt-in) / `none` |
+| `workbookBackupFresh` | 저장 전 메모리 상태를 담은 사본일 때만 `true` |
+| `workbookBackupAvailable` | 사본 파일이 실제로 생겼는지 |
+| `workbookBackupSavedFlag` | 캡처 시점 `Saved`. 읽지 못하면 `null`이며 `false`로 바꾸지 않는다 |
+| `workbookBackupReason` | 이 출처를 고른 이유 문장 |
+| `workbookBackupFreshCopyEnabled` | opt-in 환경변수가 켜져 있었는지 |
+| `workbookBackupFileFormat` | opt-in이 켜졌을 때만 기록한다. 키가 없으면 "읽지 않음"이며, `null`인 "읽었지만 읽히지 않음"과 다르다 |
+
+`DOCBRIDGE_EXCEL_FRESH_WORKBOOK_BACKUP=1`을 설정하면(정확히 `1`만 활성) 일반 `.xlsx`(`FileFormat` 51)이고 `Saved`가 읽히며 false인 workbook에 한해 `SaveCopyAs`로 저장 전 상태를 복사한다. 이때 workbook 전체가 직렬화되므로 편집 크기와 무관하게 workbook 크기에 비례하는 비용이 든다. 켜기 전에 [PERFORMANCE.md](PERFORMANCE.md)의 비용과 안전 조건을 확인한다.
+
+opt-in을 켠 경우에도 워크북을 저장·닫기·활성화하지 않고 `Saved`나 경로를 되돌려 쓰지 않으며 `DisplayAlerts`를 건드리지 않는다. 복사 전후의 `FullName`, `Saved`, 소유 인스턴스의 열린 workbook 수를 읽어 비교한다. 복사 전에 상태를 모두 읽지 못하면 최신 사본을 시도하지 않고 마지막 저장 파일을 복사하며 그 이유를 기록한다. 복사를 시도한 뒤 상태가 보존됐음을 확인하지 못하면 스냅샷을 거절해 편집을 막는다. 이미 있는 대상 파일은 어느 경우에도 덮어쓰지 않는다.
+
+## 지연 서식 체크포인트 (opt-in, 실험적 확대 중)
+
+기본값은 꺼져 있다. `DOCBRIDGE_EXCEL_DEFERRED_FORMAT_SNAPSHOT=1`(정확히 `1`만 활성)일 때, 그리고 **execute 경로**일 때만 후보가 된다. dry-run·confirm 재사용·`core_create_snapshot`은 host가 execute 컨텍스트를 찍지 않으므로 절대 지연 경로로 가지 않는다. 이는 dry-run이 지연 스냅샷을 만들면 이후 confirm이 `freshPreviewAllowed=false`로 거절되기 때문이며, 환경변수만으로 추론하지 않는다.
+
+무엇을 바꾸는가: 적용 전 서식 상태를 **어디서 읽는지**만 바꾼다. 무엇을 복원하는지, 무엇을 검증된 롤백으로 볼지, 기본 동작과 dry-run 의미는 그대로다. 비싼 셀별 COM 읽기를 캡처 시점이 아니라 **롤백이 실제로 필요할 때**로 미루고, 그 대신 캡처 시점에 `SaveCopyAs`로 저장 전 상태의 체크포인트 사본을 남긴다.
+
+### 자격 조건
+
+요청 단계(COM 없음)와 워크북 단계(라이브 COM), 그리고 체크포인트 **바이트** 단계를 모두 통과해야 한다. 자격 거절은 세 단계 모두 apply보다 앞에 있으므로 **워크북에 아무것도 쓰기 전에** 기존 eager format-only 경로로 되돌아가며, 부분 적용 뒤에 경로가 바뀌는 일은 없다. 거절 사유는 스냅샷 `metadata.json`의 `deferredEligibility`(`eligible=false`, `used=false`, `code`, `reason`)에 남는다.
+
+다만 **모든 실패가 대체 경로로 가는 것은 아니다.** 기준은 `SaveCopyAs`를 **시도했는지**다.
+
+- 복사 **전에** `FullName`·`Saved`·열린 워크북 수를 다 읽지 못하면 `identity` 자격 거절이다. 사본을 만들지 않은 채 기본 eager 경로로 되돌아간다. 검증할 수 없는 사본을 만들지 않기 위한 보수적 선택이며, 여기까지는 평범한 대체 경로다.
+- 복사를 **시도한 뒤**에는 같은 값을 다시 읽어 이전과 비교한다. 이 비교로 워크북이 그대로임을 확인하지 못하면 — 값이 달라졌든, 이번에는 읽히지 않든 — 대체 경로로 내려가지 않고 스냅샷 자체를 거절해 그 편집이 진행되지 않게 한다. `SaveCopyAs`가 실패했거나 파일을 만들지 못한 경우도 마찬가지로, 확인이 되지 않으면 거절이다. 신원을 확인하지 못한 워크북에 쓰기를 이어 가지 않기 위해서다.
+- 비교가 "그대로"임을 확인했는데 `SaveCopyAs`만 실패했거나 파일이 없으면, 그때는 `identity` 자격 거절로 기본 경로로 되돌아간다.
+
+| 단계 | 거절 code |
+|---|---|
+| 요청 | `policy`, `host-context`, `ops`, `sheet-range`, `style`, `cell-count` |
+| 워크북 | `path`, `file-format`, `file-size`, `macros`, `protection`, `password`, `links`, `identity` |
+| 체크포인트 바이트 | `encrypted-ooxml`, `ole2-compound-file`, `xlsb-binary`, `unknown-container`, `bad-zip`, `duplicate-package-part`, `strict-ooxml`, `macro-enabled-main`, `vba-project`, `xlm-macrosheet`, `external-links`, `connections`, `ole-or-activex`, `formulas`, `defined-names`, `conditional-formatting`, `data-validation`, `merge-cells`, `rich-text`, `rgb-tint`, `full-calc-on-load`, `complex-part`, `missing-content-types`, `missing-workbook-xml`, `relationship-target`, `dtd-prohibited`, `malformed-xml`, `uncompressed-xml`, `file-size` |
+
+- 단일 `format_range` 배치, 단일 직사각형 A1 대상, `target.sheet` 명시, `fillColor` 포함이어야 한다. Bold 전용처럼 `fillColor`가 없는 배치는 기존 균일 빠른 경로가 이미 싸므로 지연 대상이 아니다.
+- 대상 셀 수는 1,000..5,000, 원본과 체크포인트는 16MiB(16,777,216바이트) 이하여야 한다. 최적 교차점 주장이 아니라 보수적 롤아웃 한계다.
+- 로컬 `.xlsx`(`FileFormat` 51)만이며 UNC/URI, 매크로, 보호, 암호, 외부 링크는 거절한다. 암호가 걸린 워크북은 `SaveCopyAs` 사본도 암호가 걸리고, 그것을 사용자의 Excel에서 다시 열면 **모달 암호 창**이 뜬다. 그래서 바이트 단계에서 먼저 막는다.
+- **수식은 전부 거절한다.** 대상 범위 안이든 밖이든, 다른 시트에 있든, 값이 캐시되어 있든 상관없다. `<f>` 요소를 만나면 `formulas`이고, `xl/calcChain.xml`·`xl/tables/`·`xl/volatileDependencies.xml`처럼 수식을 전제하는 파트가 있어도 `formulas`다. 워크북에 수식이 하나라도 있으면 이 경로는 후보가 아니며, 서식 편집 자체가 수식과 무관해도 마찬가지다.
+- **plain-data 파트 어휘 밖의 파트도 전부 거절한다**(`complex-part`). 허용 목록은 `[Content_Types].xml`, `_rels/.rels`, `docProps/core|app|custom.xml`, `xl/workbook.xml`, `xl/_rels/workbook.xml.rels`, `xl/styles.xml`, `xl/sharedStrings.xml`, `xl/theme/theme1.xml`, `xl/worksheets/sheetN.xml`(+ 그 `_rels`), `xl/printerSettings/printerSettingsN.bin`이며, **이 목록에 없는 것은 모두 거절**이다. 파트 개수 상한을 넘겨도 같은 `complex-part`다.
+- 특히 웹 추가 기능(Office 추가 기능) 파트 `xl/webextensions/taskpanes.xml`과 `xl/webextensions/webextensionN.xml`은 허용 목록에 **없으므로 거절 대상**이다. 추가 기능이 **화면에 보이지 않거나 숨겨져 있어도**, 사용자가 그것을 쓰지 않아도, 파트가 패키지에 들어 있으면 거절이다.
+- 새 워크북에 이 파트가 붙는지는 **Excel 시작 상태에 따라 달라진다**. 같은 장비에서 `Workbooks.Add`가 webextension 파트 3개를 넣은 실행과 하나도 넣지 않은 실행이 모두 관측되었다. 그래서 "새 워크북이면 통과한다"고 가정하지 않고, 판단은 항상 실제 체크포인트 바이트로 한다.
+- v1에서는 병합·서식 있는 텍스트·미지원 RGB+tint·이름 정의·조건부 서식·데이터 유효성을 포함한 체크포인트도 각자의 code로 거절한다.
+- 셀 한도 100,000과 STA 120초는 올리지 않았다.
+
+### 구버전 호환 봉투(envelope)
+
+`state.json`은 `restoreMode=copy-sheet-topology`, `snapshotVersion=4`, `payloadMode=deferred-format-only`의 **정확한 3-튜플**로 기록한다. 새 디코더는 이 조합을 일반 topology 복원보다 **먼저** 정확히 매칭해 라우팅하고, 3-튜플이 불완전하면 일반 topology로 흘려보내지 않고 거절한다.
+
+이 조합인 이유는 하나다. 설치본 0.4.18에는 format-only 디코더 자체가 없어서 `restoreMode=format-only`로 적으면 legacy 분기로 떨어지고 0셀 복원을 성공으로 보고할 수 있다. 반면 0.4.18과 0.4.20 모두 copy-sheet-topology는 디코드하며, 쓰기 전에 `snapshotVersion`을 먼저 비교하므로 4를 **변경 없이 거절**한다. 이 거절은 설치본 0.4.18, 로컬 동결 후보, GitHub에 게시된 v0.4.20 자산 세 바이너리에서 실제로 실행해 확인했다. 근거는 아래 「검증 상태」에 있다.
+
+### 복원 시 동작
+
+체크포인트 경로는 `state.json`에 적힌 경로를 따라가지 않고 `snapshotDir`에서 다시 조립한다. 기록된 파일 이름이 다르면 **거절**이지 재지정이 아니다. 해시를 `FileShare.Read` 핸들을 쥔 채 확인하고, 읽기 전용(`UpdateLinks=0`, `AddToMru=false`, `Notify=false`)으로 연 뒤 기존 `CaptureFormatOnlyState`로 서식을 읽고, 체크포인트만 닫고 **열기 전에 활성이던 워크북**과 워크북 수를 되돌린 다음 기존 scoped 복원을 라이브 워크북에 적용한다. `DisplayAlerts`는 건드리지 않는다.
+
+추출이 실패하면 `ok=false`이고 `readback.verified`가 없으며 체크포인트 파일은 남긴다. `deferredExtraction`으로 "롤백이 돌았지만 불일치"와 "롤백을 재구성조차 못함"을 구분한다. host의 `IsVerifiedRestore`에는 지연 전용 예외를 추가하지 않는다.
+
+### 한계 (문서화된 사실)
+
+- **크래시 복구가 아니다.** 체크포인트는 파일이라 오래 남지만, 지연 추출은 Excel이 살아 있고 원본 워크북이 기록된 `documentRef`로 여전히 열려 있어야 동작한다. host 프로세스는 새로 떠도 되지만 Excel이 다시 뜬 상황은 복원할 수 없다. `deferredRestoreRequiresLiveSession=true`가 이를 명시한다.
+- **롤백이 느려진다.** 캡처가 싸지는 대신 실제 롤백은 추출+복원 비용을 낸다. 롤백이 드물다는 데 거는 선택이다.
+- **롤백 페이로드가 캡처 시점에 완성되어 있지 않다.** 추출이 실패하면 "적용 실패 + 롤백 없음"이 될 수 있고, 그 경우 host는 기존 문구로 검증 실패를 보고한다.
+
+### 검증 상태 (2026-09-10)
+
+측정 대상 `DocBridge.Core.dll`은 SHA-256 `357D981F2F11F0F41D424657D04F645200E4B80EC3485AD4E35A2DAE1664E248`이다. CLI 출력 디렉터리와 테스트 출력 디렉터리에 같은 해시를 가진 **동일한 사본**이 들어 있다는 뜻이며, CLI 실행 파일과 테스트 어셈블리는 각자 다른 해시를 가진 별개 파일이다. 이 빌드의 제품 회귀는 Core 631/631, MCP 20/20이다. 아래는 root가 실제 Excel에서 실행해 통과한 결과이며, 릴리스나 설치를 뜻하지 않는다. 수치는 [PERFORMANCE.md](PERFORMANCE.md)에 있다.
+
+- 켠 상태 execute와 명시 복원(1,000셀): `native-1000-20260910-100904`. 대상 1,000셀 서식 전수 비교 불일치 0이고, 체크포인트 **이후에** 넣은 값·수식·숫자 서식, 다른 시트의 표식, 저장되지 않은 dirty 상태와 세션 설정이 보존되었다. 같은 확인을 CLI 경로에서도 했다(`native-1000-20260910-101029`).
+- 5,000셀(`native-5000-20260910-102039`)에서 실행한 것은 **짝 비교의 서식 복원과 부분 실패 롤백**이다. 5,000셀 서식은 전수 비교 불일치 0이지만, 체크포인트 이후 값·수식·숫자 서식 보존 검사는 이 규모에서 실행하지 않았다. 그 검사는 위 1,000셀 두 사례의 결과다.
+- 실제 부분 실패의 자동 롤백: 1,000셀 `native-1000-20260910-101029`, 5,000셀 `native-5000-20260910-102039`. 주입한 실패 전에 실제 셀 쓰기가 일어났고, 롤백은 `verified=true`로 대상 셀 서식이 전수 일치했다.
+- CLI worker 왕복: `native-1000-20260910-101029`. 별도 프로세스가 만든 스냅샷 metadata가 온전히 남고, 또 다른 새 프로세스가 그 스냅샷으로 복원했다.
+- 손상된 체크포인트 거절: `native-1000-20260910-101029`. 해시 불일치로 거절했고 라이브 워크북은 그대로, 체크포인트 파일은 증거로 남았다.
+- 수식으로 자격에서 거절된 워크북의 eager 대체 경로: `native-1000-20260910-101750`. 제품이 `formulas`로 거절하고 기존 eager format-only 스냅샷을 만든 뒤, 명시 복원이 대상 서식을 되돌리고 심어 둔 수식·다른 시트 표식·세션 상태를 보존했다.
+- 구버전 거절: `native-1000-20260910-102852`. 설치본 0.4.18, 로컬에 동결해 둔 이전 0.4.20 기반 후보(Core `AE19909C…`), 그리고 **GitHub에 게시된 v0.4.20 자산**(릴리스 ZIP SHA-256 `1B41A71557368C94D57EAC2833D61FB5EC045EB6A86B0BF2E6BA97FB16C7CB04`, 그 안의 Core `CD5BD267D88D5712BF5AF032FFEA26DAE563AE90C3B947891D73AE129982FCDF`) 세 바이너리가 모두 dry-run 토큰까지 받은 뒤 `snapshotVersion` 4를 지원하지 않는다며 **쓰기 전에** 거절했고, 이어진 native 재검사에서 모든 셀이 그대로였다. 공개 자산 실행 결과는 `old-cli-doc-bridge-78b2d71c-restore.json`이고 provenance에 세 Core 해시가 함께 기록되어 있다.
+
+남은 한계 하나는 그대로다. **추가 기능 파트(`complex-part`)를 통한 대체 경로는 native로 확인하지 못했다.** 그 사례를 시도한 실행의 Excel 인스턴스가 `Workbooks.Add`에서 webextension 파트를 하나도 만들지 않아 전제 조건에서 실패했다. 앞선 실행들에서는 같은 방식으로 만든 파일에 파트 3개가 실제로 들어 있었고 제품은 그것을 정확히 거절했지만, 시작 상태에 따라 달라지는 이상 재현 가능한 native fixture가 아니다. 그래서 결정적인 수식 기반 사례로 교체했으며, 위 `formulas` 거절을 `complex-part` 거절의 native 증거로 읽지 않는다.
+
 ## Visibility batch 계약
 
 `set_rows_hidden`, `set_cols_hidden`, `set_sheet_visibility`는 같은 batch에 함께 넣을 수 있다.

@@ -145,7 +145,11 @@ public sealed partial class DocBridgeHost
             try
             {
                 info = _snapshots.Create(app, $"{tool} execute", targetDocument,
-                    (dir, meta) => adapter.CaptureSnapshot(dir, meta, parsed.Ops));
+                    (dir, meta) =>
+                    {
+                        meta[HostSnapshotCaptureContext.MetadataKey] = HostSnapshotCaptureContext.Execute;
+                        adapter.CaptureSnapshot(dir, meta, parsed.Ops);
+                    });
             }
             catch (Exception ex)
             {
@@ -342,6 +346,11 @@ public sealed partial class DocBridgeHost
             {
                 var restored = adapter.RestoreSnapshot(snapshotInfo.Dir, snapshotMetadata);
                 rollback["result"] = restored.DeepClone();
+                if (Json.GetObj(restored, "deferredExtraction") is JsonObject extraction)
+                    rollback["deferredExtraction"] = extraction.DeepClone();
+                var extractionFailed = Json.GetString(restored, "deferredExtractionFailed");
+                if (!string.IsNullOrWhiteSpace(extractionFailed))
+                    rollback["deferredExtractionFailed"] = extractionFailed;
                 rollback["verified"] = IsVerifiedRestore(restored, snapshotMetadata);
                 if (Json.GetBool(rollback, "verified"))
                     exec.Warnings.Add("apply failed; the pre-apply snapshot was restored automatically");

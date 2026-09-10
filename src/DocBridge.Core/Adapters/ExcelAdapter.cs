@@ -1732,6 +1732,14 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
     private const string CopySheetTopologyRestoreMode = "copy-sheet-topology";
     private const string LegacyFullRangeRestoreMode = "legacy-full-range";
 
+    private static bool IsKnownExcelRestoreMode(string? restoreMode) =>
+        string.IsNullOrWhiteSpace(restoreMode)
+        || string.Equals(restoreMode, FormatOnlyRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, CopySheetTopologyRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, VisibilityRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, MergeRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, LegacyFullRangeRestoreMode, StringComparison.Ordinal);
+
     private sealed class RestoreMismatchCollector
     {
         private readonly List<string> _samples = new(MaxRestoreMismatchSamples);
@@ -1998,21 +2006,27 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             using var workbookLease = ResolveTargetWorkbook(d, defaultWorkbook, ops);
             dynamic wb = workbookLease.Workbook;
 
-            // 1) workbook 파일 복사 (저장된 경우) — Excel이 잠그고 있으므로 공유 읽기로 복사
+            // Deferred format checkpoint (opt-in execute only) runs first so a
+            // successful SaveCopyAs is not followed by a second whole-file copy.
+            // Ineligible batches fall through to the existing auxiliary backup +
+            // eager scoped snapshot. Identity drift during the native copy throws.
             string? fullName = null;
             try { fullName = (string)wb.FullName; } catch { }
-            if (!string.IsNullOrEmpty(fullName) && File.Exists(fullName))
+            if (TryCaptureDeferredFormatCheckpoint(
+                    (object)wb, app, snapshotDir, metadata, ops,
+                    ExcelDeferredFormatSnapshotPolicy.FromEnvironment()))
             {
-                var dest = Path.Combine(snapshotDir, "workbook-backup" + Path.GetExtension(fullName));
-                try
-                {
-                    using var src = new FileStream(fullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                    using var dst = new FileStream(dest, FileMode.Create, FileAccess.Write);
-                    src.CopyTo(dst);
-                    metadata["workbookBackup"] = Path.GetFileName(dest);
-                }
-                catch (Exception ex) { metadata["workbookBackupError"] = ex.Message; }
+                return;
             }
+
+            // 1) 보조 workbook 사본. 자동 복원 소비자가 없는 운영자용 증거 파일이며,
+            //    operation-scoped 롤백 의미는 아래 state.json이 그대로 담당한다.
+            //    기본값은 예전과 같이 마지막 저장 파일 복사이며 metadata가 출처와
+            //    Saved 플래그를 명시한다. DOCBRIDGE_EXCEL_FRESH_WORKBOOK_BACKUP=1일
+            //    때만 일반 .xlsx의 저장 전 상태를 SaveCopyAs로 복사한다. 작은 편집이
+            //    workbook 전체 직렬화 비용을 기본으로 치르지 않게 하기 위한 선택이다.
+            CaptureAuxiliaryWorkbookBackup(
+                (object)wb, app, snapshotDir, metadata, App, ExcelWorkbookBackupPolicy.FromEnvironment());
 
             // copy_sheet-only batches have a complete, operation-scoped inverse: remove the
             // newly created target worksheets in reverse order. Capturing or rewriting every
@@ -2158,6 +2172,12 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             dynamic d = app;
             var state = JsonNode.Parse(File.ReadAllText(statePath)) as JsonObject ?? new JsonObject();
             var restoreMode = Json.GetString(state, "restoreMode");
+            if (!IsKnownExcelRestoreMode(restoreMode))
+                return Json.ErrorResult($"unsupported Excel snapshot restoreMode '{restoreMode}'", App);
+            if (IsDeferredFormatEnvelope(state))
+                return RestoreDeferredFormatOnlySnapshot(snapshotDir, metadata, state);
+            if (LooksLikeIncompleteDeferredFormatEnvelope(state))
+                return Json.ErrorResult("incomplete deferred format-only envelope", App);
             if (string.Equals(restoreMode, FormatOnlyRestoreMode, StringComparison.Ordinal))
             {
                 var documentRef = Json.GetString(state, "documentRef") ?? Json.GetString(metadata, "documentRef");
@@ -2187,6 +2207,7 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                     "스냅샷 시점의 workbook을 먼저 여세요.", App);
             if (string.Equals(restoreMode, CopySheetTopologyRestoreMode, StringComparison.Ordinal))
             {
+                // Deferred v4 envelope is handled above. .18/.20 refuse version != 2 here.
                 if (Json.GetInt(state, "snapshotVersion") != CurrentExcelSnapshotVersion)
                 {
                     var invalid = new RestoreMismatchCollector();
@@ -2324,6 +2345,12 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                 }
             }
             finally { d.ScreenUpdating = true; }
+
+            if (restoredCells == 0 && checkedCells == 0)
+            {
+                mismatches.Add(
+                    "legacy snapshot restore checked zero cells; refusing to claim a verified rollback");
+            }
 
             return BuildRestoreResult(
                 mismatches.Count == 0,

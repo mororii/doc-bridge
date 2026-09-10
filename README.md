@@ -1,4 +1,4 @@
-# DocBridge 0.4.20
+# DocBridge 0.4.21
 
 Windows의 Microsoft Excel, 한컴 한글(HWP/HWPX), AutoCAD 및 GstarCAD를 Kimi·Claude·Codex·Cursor가 공통 MCP 도구로 읽고 수정하게 하는 로컬 브리지입니다.
 
@@ -17,13 +17,43 @@ Windows의 Microsoft Excel, 한컴 한글(HWP/HWPX), AutoCAD 및 GstarCAD를 Kim
 
 ## 현재 검증 상태
 
+0.4.21은 Excel **지연 서식 체크포인트**를 실제 execute 경로(호스트와 CLI worker)에 추가합니다. 기본값은 꺼져 있고 `DOCBRIDGE_EXCEL_DEFERRED_FORMAT_SNAPSHOT=1`(정확히 `1`만 활성)일 때만 후보를 검사합니다. 적용 전에 저장 전 메모리 상태를 체크포인트로 복사하고, 복구가 필요할 때 그 사본에서 **그 작업이 바꾼 서식만** 읽어 되돌립니다. 전체 워크북을 덮어쓰지 않으며 체크포인트 이후에 입력한 값·수식·대상 밖 서식은 유지합니다. 사용자 승인 단계를 새로 추가하지 않았습니다. 정상 적용이 빨라지는 대신 **복구는 느려집니다**. 후보 범위는 단일 `format_range`(`fillColor` 포함, 시트와 직사각형 A1 명시), 1,000~5,000셀, 로컬 일반 `.xlsx`, 원본과 체크포인트 각각 16MiB 이하입니다. **모든 수식**과 매크로·외부 연결·보호·암호·병합·웹 추가 기능 같은 복잡한 파트가 있으면 **변경 전에** 기존 스냅샷 경로로 되돌아갑니다. 다만 체크포인트 사본을 시도한 뒤 워크북이 그대로임을 확인하지 못하면 되돌아가지 않고 스냅샷을 거절해 그 편집이 진행되지 않게 합니다. 복구는 Excel과 대상 워크북이 살아 있는 세션을 요구하며 크래시 복구가 아닙니다. 계약은 [Excel 작업 안내](docs/EXCEL-OPERATIONS.md), 변경 요약과 사용 지침은 [RELEASE-0.4.21.md](docs/RELEASE-0.4.21.md)에 있습니다.
+
+0.4.21은 이와 함께 보조 workbook 사본의 출처를 metadata에 명시하고 저장 전 메모리 사본을 선택적으로 켤 수 있게 했으며, CAD의 객체당 중복 COM 속성 읽기 7회를 지문 변경 없이 제거하고, 한글의 문단 지도 생성에 상한을 두고 전체 텍스트 읽기 실패를 성공으로 숨기지 않습니다.
+
+0.4.21 구현 빌드에서 확인한 범위(버전을 올리기 전 구현 측정이며, 아래 로컬 릴리즈 검증과 합산하지 않는다):
+
+- 비-E2E Core 631·MCP 20, 통합 Release `-warnaserror` 경고 0·오류 0.
+- Excel 1,000셀 실제 앱 7종(정상 적용·복구, 실제 부분 실패 자동 복구, 손상 체크포인트 거절, CLI 새 프로세스 복구, 구버전 거절, 기존/새 방식 비교, 수식 파일의 기존 경로 전환)과 5,000셀 2종(비교, 부분 실패 자동 복구) 통과. 대상 셀 서식 전수 비교 불일치 0.
+- 적용 1,000셀 7.235→0.113초, 5,000셀 24.206→0.124초. 복구는 9.021→15.736초, 39.175→60.805초. 각 규모마다 순서가 있는 단일 표본이며 p50/p95나 만능 속도 배율이 아니다. 비용이 사라진 것이 아니라 캡처에서 롤백으로 옮겨갔다.
+- 체크포인트 이후 입력한 값·수식·표시 형식의 보존은 **1,000셀 정상 사례와 1,000셀 CLI 사례에서만** 확인했다. 5,000셀 시험은 서식 복원과 부분 실패 복구다.
+- 구버전 거절은 설치본 0.4.18, 이전 로컬 후보 빌드, GitHub에서 내려받은 공개 0.4.20 바이너리에서 실제로 통과했다.
+- 이전 단계의 AutoCAD/GstarCAD native 4건과 한글 native 3건은 그대로 유지된다.
+- 웹 추가 기능 파트를 통한 기존 경로 전환은 실제 앱에서 확인하지 못했다. 생성 파일에 그 정보가 들어가는지가 실행마다 달라 재현 가능한 시험 파일이 아니며, 전환 자체는 수식 파일로 검증했다.
+
+### 0.4.21 로컬 릴리즈 검증
+
+버전을 0.4.21로 맞춘 뒤 이 PC에서 통과한 로컬 게이트다. 위 구현 빌드 수치와 합산하지 않는다. GitHub CI와 공개 ZIP은 소스 푸시 뒤에 확인하며, 이 절은 그 통과를 주장하지 않는다. 진행 상태는 [Actions](https://github.com/mororii/doc-bridge/actions)와 [Releases](https://github.com/mororii/doc-bridge/releases)에서 본다.
+
+- 통합 Release `-warnaserror` 경고 0·오류 0.
+- 비-E2E Core 659·MCP 20. 필터는 `FullyQualifiedName!~E2ETests&Category!=E2E`다. 구현 빌드 Core 631과의 28건 차이는 예전 더 넓은 E2E 이름 필터에 걸려 빠졌던 `HwpE2EOwnershipTests` 순수 단위 테스트이며, 제품·테스트 소스를 바꾼 결과가 아니다.
+- 버전 일치와 초보자 가이드 검증 통과.
+- 공개 소스 검사 222파일에서 자격 증명·개인 자료 없음, 추적 PowerShell 19파일 구문 통과.
+- win-x64 자체 포함 패키지 생성, 체크섬 407개 전수 일치, 빌드 PC·프로필 개인 경로 검사 통과.
+- 가짜 사용자 폴더에서 설치·진단·제거 수명주기 통과.
+- 패키지 CLI로 1,000셀 실제 Excel 왕복 45.999초 통과. worker가 지연 서식 메타데이터를 전달했고, 다른 CLI 프로세스에서 복구했으며, 대상 1,000셀 원래 서식 전수 일치, 이후 입력한 셀 값·수식·표시 형식과 다른 시트 내용 유지, 원래 Excel 세션 설정 유지, 소유 Excel 종료 후 잔류 없음.
+
+기본값은 꺼져 있고, 후보 조건·수식/복잡 파트 제외·살아 있는 세션 복구 제한은 그대로다. 웹 추가 기능 파트를 통한 기존 경로 전환의 실앱 확인과 호스트 크래시 뒤 Excel 잔류는 이 게이트로 해소되지 않았다.
+
 0.4.20은 GstarCAD 전용 `gstarcad_*` 도구 4개를 추가합니다. 기존 `cad_*`는 AutoCAD 전용으로 유지합니다. 연결 인스턴스, 승인 토큰, 스냅샷은 제품별로 분리하며 자동 대체 연결하지 않습니다. 기본 편집만 지원하고 해치·문서 간 복사·XREF·배치 편집·PDF·스크립트·RGB 색상은 차단합니다. 미지원 기능을 검증했다고 쓰지 않습니다. [GstarCAD 사용·검증 안내](docs/GSTARCAD.md)를 참고하세요.
 
 일반 편집은 앱별 `autoExecuteOps`에서 `executionMode=execute`로 한 번에 적용할 수 있습니다. Excel은 `set_values`/`set_formulas`/`format_range`, 한글은 `default.policy`와 `core_get_capabilities`의 현재 목록(커서 삽입 `insert_text`는 제외), CAD/GstarCAD는 `set_text_value`/`set_layer_visibility`/`set_layer_color`/`regen_document`만입니다. Excel/CAD/GstarCAD execute는 저장된 절대 경로만 안내합니다. 현재 어댑터는 인스턴스 바인딩 참조를 발급하지 않습니다. `Book1`/`Drawing1` 같은 미저장 이름은 기존 토큰 경로이며, 경로를 만들기 위해 자동 저장하지 않습니다. 한글은 반환된 `documentRef`/`instanceRef`를 그대로 사용합니다. 미리보기와 고위험·구조 변경·삭제·저장·내보내기는 기존 dry-run → 같은 ops/`confirmToken` 경로입니다. CAD dirty 광범위 작업이나 저장 지문이 맞지 않으면 거절하며, 자동 저장으로 우회하지 않습니다.
 
 Excel 서식-only는 v3 `written-properties` 스냅샷을 씁니다. Bold만 바꾸면 다른 색·tint를 읽거나 복구하지 않습니다. 이전 v2 전체 서식 스냅샷도 복구합니다. 오래된 format preview 토큰은 새 dry-run이 필요할 수 있습니다. 셀 한도 100,000과 STA 120초는 올리지 않았습니다. 저장된 소유 통합문서의 정상 disconnect/파이프 정리는 지원하지만 호스트 크래시 뒤 Excel 잔류는 반증 전까지 미해결입니다.
 
-확인된 범위의 숫자와 단일 표본 제한은 [PERFORMANCE.md](docs/PERFORMANCE.md)와 [RELEASE-0.4.20.md](docs/RELEASE-0.4.20.md)에 있습니다.
+확인된 범위의 숫자와 단일 표본 제한은 [PERFORMANCE.md](docs/PERFORMANCE.md), 최신 릴리즈 노트 [RELEASE-0.4.21.md](docs/RELEASE-0.4.21.md), 이전 [RELEASE-0.4.20.md](docs/RELEASE-0.4.20.md)에 있습니다.
+
+0.4.20에서 확인한 범위:
 
 - 통합 Release `-warnaserror` 경고 0·오류 0, 비-E2E Core 421·MCP 20.
 - Excel 균일 Bold 1,000/7,000셀과 혼합 1,000/7,000셀 전수 mismatch 0. 균일 7,000셀 execute 0.459초와 혼합 7,000셀 82.809초는 다른 작업이다. 만능 속도 배수를 만들지 않는다.

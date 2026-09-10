@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>DocBridge.ExcelSnapshotStrategyProbe</AssemblyName>
+    <RootNamespace>DocBridge.Development.ExcelSnapshotStrategyProbe</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Description>Guarded experiment: production scoped format snapshot versus Workbook.SaveCopyAs. Not a product binary.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\DocBridge.Core\DocBridge.Core.csproj" />
+  </ItemGroup>
+</Project>

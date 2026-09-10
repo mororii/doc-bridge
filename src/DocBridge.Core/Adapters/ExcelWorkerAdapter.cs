@@ -105,14 +105,90 @@ public sealed class ExcelWorkerAdapter : IAppAdapter, IConnectionLifecycleAdapte
         return result;
     }
 
+    /// <summary>
+    /// Host-owned metadata keys. <see cref="Services.SnapshotService"/> writes these before the
+    /// adapter runs and identifies the snapshot directory by them; the worker only ever echoes
+    /// them back. A worker that returns a different value for one of them is not a capture we
+    /// can trust, so the merge refuses rather than picking a winner.
+    /// </summary>
+    private static readonly string[] HostOwnedSnapshotMetadataKeys =
+        { "snapshotId", "app", "createdAt", "reason" };
+
     public void CaptureSnapshot(string snapshotDir, JsonObject metadata, IReadOnlyList<JsonObject>? ops = null)
     {
-        _ = Call("captureSnapshot", new JsonObject
+        var response = Call("captureSnapshot", new JsonObject
         {
             ["snapshotDir"] = snapshotDir,
             ["metadata"] = metadata.DeepClone(),
             ["ops"] = ops is null ? null : OpsToJson(ops),
         });
+
+        MergeCapturedSnapshotMetadata(metadata, response);
+    }
+
+    /// <summary>
+    /// Copies the metadata the worker's adapter produced back into the caller's object.
+    ///
+    /// In-process, <c>ExcelAdapter.CaptureSnapshot</c> mutates the caller's metadata directly:
+    /// payload, the authoritative documentRef read from the workbook it actually resolved,
+    /// restoreMode, formatFingerprint and the auxiliary-backup keys. Across the worker boundary
+    /// the adapter mutates a deserialized copy inside the child process, so without this merge
+    /// every one of those keys is silently lost and <c>metadata.json</c> records only what the
+    /// host already knew. That divergence is not cosmetic: the host reads snapshot metadata when
+    /// it decides rollback coverage, so a capture that marks partial coverage in-process would be
+    /// reported as fully covered through the worker.
+    ///
+    /// Failure is closed, never silent. A missing or malformed <c>metadata</c> member, or a
+    /// worker that alters a host-owned key, throws — a silent non-merge is exactly the defect
+    /// this replaces. Keys the caller holds and the response omits are left alone, so a truncated
+    /// response cannot erase host-owned state.
+    /// </summary>
+    internal static void MergeCapturedSnapshotMetadata(JsonObject metadata, JsonObject response)
+    {
+        // The worker states success explicitly. A response that merely happens to carry a
+        // metadata object — a truncated write, a future protocol change, a handler that returned
+        // early — is not a capture, and merging its metadata would record a snapshot that was
+        // never taken.
+        if (response["captured"] is not JsonValue capturedFlag
+            || !capturedFlag.TryGetValue<bool>(out var captured))
+        {
+            throw new InvalidDataException(
+                "Excel worker captureSnapshot response has no boolean 'captured' flag; " +
+                "refusing to record a snapshot whose capture was not confirmed");
+        }
+
+        if (!captured)
+        {
+            throw new InvalidDataException(
+                "Excel worker captureSnapshot reported captured=false; refusing to record the snapshot");
+        }
+
+        if (response["metadata"] is not JsonObject capturedMetadata)
+        {
+            throw new InvalidDataException(
+                "Excel worker captureSnapshot did not return the captured metadata object; " +
+                "refusing to record a snapshot whose adapter metadata is unknown");
+        }
+
+        foreach (var key in HostOwnedSnapshotMetadataKeys)
+        {
+            if (!metadata.TryGetPropertyValue(key, out var original)) continue;
+            if (!capturedMetadata.TryGetPropertyValue(key, out var echoed))
+            {
+                throw new InvalidDataException(
+                    $"Excel worker captureSnapshot dropped host-owned metadata '{key}'");
+            }
+
+            if (!JsonNode.DeepEquals(original, echoed))
+            {
+                throw new InvalidDataException(
+                    $"Excel worker captureSnapshot changed host-owned metadata '{key}'; " +
+                    "refusing the captured metadata");
+            }
+        }
+
+        foreach (var (key, value) in capturedMetadata)
+            metadata[key] = value?.DeepClone();
     }
 
     public JsonObject RestoreSnapshot(string snapshotDir, JsonObject metadata) =>
@@ -349,10 +425,14 @@ public static class ExcelWorkerProcess
     private static JsonObject CaptureSnapshot(ExcelAdapter adapter, JsonObject request)
     {
         var ops = request["ops"] is JsonArray ? ParseOps(request) : null;
+        // The adapter mutates this object in place. It must travel back to the host, otherwise
+        // everything the capture recorded — payload, the resolved documentRef, restoreMode,
+        // formatFingerprint, the auxiliary-backup keys — dies with this process.
+        var metadata = Json.GetObj(request, "metadata") ?? new JsonObject();
         adapter.CaptureSnapshot(
             Json.GetString(request, "snapshotDir") ?? throw new InvalidDataException("snapshotDir is required"),
-            Json.GetObj(request, "metadata") ?? new JsonObject(), ops);
-        return new JsonObject { ["captured"] = true };
+            metadata, ops);
+        return new JsonObject { ["captured"] = true, ["metadata"] = metadata.DeepClone() };
     }
 
     private static IReadOnlyList<JsonObject> ParseOps(JsonObject request)

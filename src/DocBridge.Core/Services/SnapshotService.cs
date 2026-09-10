@@ -277,7 +277,7 @@ public sealed class SnapshotService
         return true;
     }
 
-    private static bool IsDirectoryUnder(string root, string candidate)
+    internal static bool IsDirectoryUnder(string root, string candidate)
     {
         var rootFull = Path.GetFullPath(root);
         var candidateFull = Path.GetFullPath(candidate);

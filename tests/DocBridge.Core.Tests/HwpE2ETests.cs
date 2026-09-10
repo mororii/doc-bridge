@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Nodes;
 using DocBridge.Core.Adapters;
 using DocBridge.Core.Models;
@@ -16,6 +17,74 @@ public class HwpE2ETests : IDisposable
 {
     private static bool Enabled =>
         string.Equals(Environment.GetEnvironmentVariable("DOCBRIDGE_E2E"), "1", StringComparison.Ordinal);
+
+    private readonly Xunit.Abstractions.ITestOutputHelper _output;
+
+    public HwpE2ETests(Xunit.Abstractions.ITestOutputHelper output) => _output = output;
+
+    /// <summary>
+    /// Profiling aid only: prints the timing dictionary a host result already carries.
+    /// It asserts nothing and reads no document content, so it cannot change what this
+    /// suite verifies.
+    /// </summary>
+    private void WriteTimings(string label, JsonObject? result)
+    {
+        var timings = Json.GetObj(result, "timings");
+        _output.WriteLine(timings is null
+            ? $"[hwp-timing] {label}: no timings reported"
+            : $"[hwp-timing] {label}: {timings.ToJsonString()}");
+    }
+
+    /// <summary>
+    /// Fixture-only hang locator. Counts, PIDs, and booleans only — no document text or paths.
+    /// </summary>
+    private static void LogPhase(string phase, string? detail = null)
+    {
+        var stamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture);
+        Console.Error.WriteLine(string.IsNullOrWhiteSpace(detail)
+            ? $"HwpE2E: {stamp} {phase}"
+            : $"HwpE2E: {stamp} {phase} {detail}");
+    }
+
+    private static JsonObject FirstActiveContext(DocBridgeHost host)
+    {
+        LogPhase("first-GetActiveContext begin");
+        var ctx = host.GetActiveContext("hwp");
+        LogPhase("first-GetActiveContext end",
+            $"ok={Json.GetBool(ctx, "ok")} textLength={Json.GetInt(Json.GetObj(ctx, "summary"), "textLength")}");
+        return ctx;
+    }
+
+    private void LogOwnedIdentity(string phase)
+    {
+        if (_adapter is null || _createdApp is null)
+        {
+            LogPhase(phase, "ownedSession=unavailable");
+            return;
+        }
+
+        try
+        {
+            _adapter.RunOnAdapterThread<object?>(() =>
+            {
+                var ok = HwpE2EOwnership.TryReadInventory(_createdApp, out var snap);
+                var hwnd = RotHelper.HwpWindowHandle(_createdApp);
+                var pid = RotHelper.ProcessIdFromWindowHandle(hwnd);
+                var seeded = _ownership?.SeededDocumentId;
+                var activeMatchesSeed = !string.IsNullOrWhiteSpace(seeded) &&
+                                        string.Equals(snap.ActiveDocumentId, seeded, StringComparison.Ordinal);
+                LogPhase(phase,
+                    $"inventoryOk={ok} pid={pid} hwnd={hwnd} documentCount={snap.DocumentCount} " +
+                    $"activeIsEmpty={snap.ActiveIsEmpty} activeMatchesOwnedSeed={activeMatchesSeed} " +
+                    $"ownedPid={_createdProcessId} ownedMode={_ownership?.Mode}");
+                return null;
+            });
+        }
+        catch (Exception ex)
+        {
+            LogPhase(phase, $"inventoryFailed type={ex.GetType().Name}");
+        }
+    }
 
     private readonly TestHome _home = new();
     private HwpAdapter? _adapter;
@@ -37,15 +106,33 @@ public class HwpE2ETests : IDisposable
             // directory while activating COM.  The injected E2E factory must use the same
             // activation envelope; otherwise older HWP 2024 builds can hang in TourPopup or
             // FontCache initialization even though the production path is healthy.
+            LogPhase("COM-activation begin", $"preexistingHwpPids={existingProcessIds.Count}");
             dynamic hwp = HwpEnvironmentDoctor.RunWithAutomationWorkingDirectory(
                 () => Activator.CreateInstance(type)!)!;
+            LogPhase("COM-activation end");
 
+            LogPhase("before-inventory begin");
             var beforeOk = HwpE2EOwnership.TryReadInventory(hwp, out HwpE2EDocumentSnapshot before);
+            LogPhase("before-inventory end",
+                $"ok={beforeOk} documentCount={before.DocumentCount} activeIsEmpty={before.ActiveIsEmpty}");
+
+            LogPhase("window-pid-resolution begin");
             var windowProcessId = RotHelper.ProcessIdFromWindowHandle(RotHelper.HwpWindowHandle(hwp));
             var processId = HwpE2EOwnershipPolicy.ResolveProcessId(
                 windowProcessId, existingProcessIds, HwpE2EOwnership.CurrentHwpProcessIds());
+            LogPhase("window-pid-resolution end",
+                $"windowPid={windowProcessId} resolvedPid={processId} reusedExisting={existingProcessIds.Contains(processId)}");
+
+            LogPhase("FileNew begin");
             bool fileNewSucceeded = HwpE2EOwnership.TryFileNew(hwp);
+            LogPhase("FileNew end", $"ok={fileNewSucceeded}");
+
+            LogPhase("after-inventory begin");
             var afterOk = HwpE2EOwnership.TryReadInventory(hwp, out HwpE2EDocumentSnapshot after);
+            LogPhase("after-inventory end",
+                $"ok={afterOk} documentCount={after.DocumentCount} activeIsEmpty={after.ActiveIsEmpty}");
+
+            LogPhase("ownership-proof begin");
             if (!HwpE2EOwnershipPolicy.TryProve(
                     existingProcessIds,
                     processId,
@@ -55,6 +142,7 @@ public class HwpE2ETests : IDisposable
                     out HwpE2EOwnershipClaim claim,
                     out string error))
             {
+                LogPhase("ownership-proof end", "ok=false");
                 string createdId = "";
                 if (fileNewSucceeded && beforeOk && afterOk &&
                     HwpE2EOwnershipPolicy.TryIdentifyCreatedTab(before, after, out createdId))
@@ -62,10 +150,15 @@ public class HwpE2ETests : IDisposable
                 throw new InvalidOperationException(error);
             }
 
+            LogPhase("ownership-proof end",
+                $"ok=true mode={claim.Mode} pid={claim.ProcessId} ownedTabCount={claim.OwnedDocumentIds.Count}");
             _ownership = claim;
             _createdApp = hwp;
             _createdProcessId = claim.ProcessId;
+            LogPhase("seed-insertion begin");
             HwpE2EOwnership.InsertSeedText(hwp, HwpE2EOwnershipPolicy.SeedText);
+            LogPhase("seed-insertion end");
+            LogPhase("factory-return");
             return (object)hwp;
         });
         var host = new DocBridgeHost(_home.Options);
@@ -84,7 +177,7 @@ public class HwpE2ETests : IDisposable
         using var host = CreateHostWithHwp();
 
         // 1) get_active_context — 구조화된 JSON
-        var ctx = host.GetActiveContext("hwp");
+        var ctx = FirstActiveContext(host);
         Assert.True(Json.GetBool(ctx, "ok"), $"context failed: {ctx}");
         Assert.Equal("hwp", Json.GetString(ctx, "app"));
         Assert.NotNull(Json.GetString(ctx, "documentRef"));
@@ -93,16 +186,36 @@ public class HwpE2ETests : IDisposable
 
         // 새 CLI/MCP 프로세스도 ROT의 기존 한글 창을 status 단계에서 즉시 식별해야 한다.
         // 그렇지 않으면 dry-run과 apply가 서로 다른 프로세스일 때 untitled 문서 ref가 빈 값이 된다.
-        using (var freshStatusAdapter = new HwpAdapter())
+        LogOwnedIdentity("before-freshStatus-GetStatus");
+        var freshStatusAdapter = new HwpAdapter();
+        try
         {
+            LogPhase("freshStatus-GetStatus begin");
             var freshStatus = freshStatusAdapter.GetStatus();
+            LogPhase("freshStatus-GetStatus end",
+                $"available={freshStatus.Available} connected={freshStatus.Connected} " +
+                $"documentRefEmpty={string.IsNullOrWhiteSpace(freshStatus.Document)} " +
+                $"existingWindow={string.Equals(freshStatus.Detail, "사용자가 열어 둔 한글 창에 연결됨", StringComparison.Ordinal)}");
             Assert.True(freshStatus.Available);
             Assert.True(freshStatus.Connected, freshStatus.Detail);
             Assert.False(string.IsNullOrWhiteSpace(freshStatus.Document));
+            LogOwnedIdentity("after-freshStatus-GetStatus");
+        }
+        finally
+        {
+            LogPhase("freshStatus-Dispose begin");
+            freshStatusAdapter.Dispose();
+            LogPhase("freshStatus-Dispose end");
         }
 
+        LogOwnedIdentity("after-freshStatus-Dispose");
+
         // 2) hwp_read_text (document scope)
+        LogPhase("owned-read begin");
         var read = host.Read("hwp", new JsonObject { ["scope"] = "document" });
+        LogPhase("owned-read end",
+            $"ok={Json.GetBool(read, "ok")} textEmpty={string.IsNullOrEmpty(Json.GetString(read, "text"))} " +
+            $"textLength={Json.GetString(read, "text")?.Length ?? 0}");
         Assert.True(Json.GetBool(read, "ok"));
         Assert.Contains("사과", Json.GetString(read, "text"));
 
@@ -118,6 +231,7 @@ public class HwpE2ETests : IDisposable
         Assert.NotNull(Json.GetObj(bundle, "documentMap"));
         Assert.NotNull(Json.GetObj(bundle, "structure"));
         Assert.NotNull(Json.GetObj(bundleRead, "timings"));
+        WriteTimings("read.bundle", bundleRead);
 
         // 3) find_replace dry-run → diff + token
         var frBatch = new JsonObject
@@ -141,6 +255,7 @@ public class HwpE2ETests : IDisposable
         Assert.NotNull(token);
         Assert.NotNull(snapshotId);
         Assert.NotEmpty(Json.GetArr(dry, "diff")!);
+        WriteTimings("find_replace.dryRun", dry);
 
         // 3b) token 없이 apply → 실패
         var noToken = new JsonObject { ["ops"] = frBatch["ops"]!.DeepClone(), ["dryRun"] = false };
@@ -157,6 +272,7 @@ public class HwpE2ETests : IDisposable
         Assert.True(Json.GetBool(applied, "ok"), $"apply failed: {applied}");
         Assert.True(Json.GetBool(Json.GetObj(applied, "readback"), "verified"));
         Assert.True(Json.GetBool(Json.GetObj(applied, "timings"), "previewReused"));
+        WriteTimings("find_replace.apply", applied);
 
         // 5) 실제 문서 확인 ("청사과"에 "사과"가 부분문자열로 포함되므로 완전 문자열로 검증)
         var after = host.Read("hwp", new JsonObject { ["scope"] = "document" });
@@ -280,6 +396,8 @@ public class HwpE2ETests : IDisposable
             ["confirmToken"] = Json.GetString(restoreDry, "confirmToken"),
         });
         Assert.True(Json.GetBool(restored, "ok"), $"restore failed: {restored}");
+        WriteTimings("restore.dryRun", restoreDry);
+        WriteTimings("restore.apply", restored);
         var restoredText = host.Read("hwp", new JsonObject { ["scope"] = "document" });
         Assert.Contains("사과 가격은 1000원", Json.GetString(restoredText, "text"));
     }
@@ -312,7 +430,7 @@ public class HwpE2ETests : IDisposable
         if (!Enabled) return;
         using var host = CreateHostWithHwp();
 
-        var firstContext = host.GetActiveContext("hwp");
+        var firstContext = FirstActiveContext(host);
         Assert.True(Json.GetBool(firstContext, "ok"), $"first context failed: {firstContext}");
         var firstRef = Json.GetString(firstContext, "documentRef");
         Assert.False(string.IsNullOrWhiteSpace(firstRef));
@@ -1205,7 +1323,7 @@ public class HwpE2ETests : IDisposable
         if (!Enabled) return;
         using var host = CreateHostWithHwp();
 
-        var ctx = host.GetActiveContext("hwp");
+        var ctx = FirstActiveContext(host);
         Assert.True(Json.GetBool(ctx, "ok"), ctx.ToJsonString());
         var documentRef = Json.GetString(ctx, "documentRef");
         Assert.False(string.IsNullOrWhiteSpace(documentRef));

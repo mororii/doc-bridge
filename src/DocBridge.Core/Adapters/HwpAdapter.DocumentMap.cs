@@ -19,6 +19,23 @@ public sealed partial class HwpAdapter
     private static JsonObject BuildDocumentMapFromText(
         dynamic hwp, string normalizedText, int startParagraph, int maxParagraphs)
     {
+        var body = BuildDocumentMapBodyFromText(normalizedText, startParagraph, maxParagraphs);
+        return new JsonObject
+        {
+            ["documentIdentity"] = CaptureDocumentIdentity(hwp),
+            ["paragraphs"] = Detach(body, "paragraphs"),
+            ["coverage"] = Detach(body, "coverage"),
+        };
+    }
+
+    /// <summary>
+    /// Hashes paragraphs from index 0 through endExclusive so later-page
+    /// duplicate-content occurrence IDs stay stable, but does not hash the tail
+    /// after the returned window.
+    /// </summary>
+    internal static JsonObject BuildDocumentMapBodyFromText(
+        string normalizedText, int startParagraph, int maxParagraphs)
+    {
         string text = NormalizeNewlines(normalizedText);
         string[] paragraphs = text.Split('\n');
         startParagraph = Math.Clamp(startParagraph, 0, paragraphs.Length);
@@ -27,7 +44,7 @@ public sealed partial class HwpAdapter
         var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
         var items = new JsonArray();
 
-        for (var index = 0; index < paragraphs.Length; index++)
+        for (var index = 0; index < endExclusive; index++)
         {
             var paragraph = paragraphs[index];
             var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(paragraph)))
@@ -35,7 +52,7 @@ public sealed partial class HwpAdapter
             occurrences.TryGetValue(digest, out int occurrence);
             occurrence++;
             occurrences[digest] = occurrence;
-            if (index < startParagraph || index >= endExclusive) continue;
+            if (index < startParagraph) continue;
 
             items.Add(new JsonObject
             {
@@ -49,7 +66,6 @@ public sealed partial class HwpAdapter
 
         return new JsonObject
         {
-            ["documentIdentity"] = CaptureDocumentIdentity(hwp),
             ["paragraphs"] = items,
             ["coverage"] = new JsonObject
             {
@@ -62,6 +78,13 @@ public sealed partial class HwpAdapter
                 ["nextStartParagraph"] = endExclusive < paragraphs.Length ? endExclusive : null,
             },
         };
+    }
+
+    private static JsonNode Detach(JsonObject obj, string key)
+    {
+        var node = obj[key] ?? throw new InvalidOperationException($"document map missing '{key}'");
+        obj.Remove(key);
+        return node;
     }
 
     private static JsonObject CapturePostEditReread(dynamic hwp)
