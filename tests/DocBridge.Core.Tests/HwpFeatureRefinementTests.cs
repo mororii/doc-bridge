@@ -13,6 +13,7 @@ public sealed class HwpFeatureRefinementTests : IDisposable
     private readonly ITestOutputHelper _output;
     private dynamic? _hwp;
     private string _createdTabId = "";
+    private HwpE2EOwnershipClaim? _claim;
 
     public HwpFeatureRefinementTests(ITestOutputHelper output) => _output = output;
 
@@ -35,8 +36,9 @@ public sealed class HwpFeatureRefinementTests : IDisposable
         if (!HwpE2EOwnership.TryReadInventory(hwp, out HwpE2EDocumentSnapshot after))
             throw new InvalidOperationException("refine: after-inventory failed");
         if (!HwpE2EOwnershipPolicy.TryProve(existing, pid, true, before, after,
-                out _, out var error))
+                out var refineClaim, out var error))
             throw new InvalidOperationException("refine: ownership unproven: " + error);
+        _claim = refineClaim;
         if (HwpE2EOwnershipPolicy.TryIdentifyCreatedTab(before, after, out var createdId))
             _createdTabId = createdId;
         _hwp = hwp;
@@ -114,6 +116,7 @@ public sealed class HwpFeatureRefinementTests : IDisposable
                 }
             }
             catch (Exception ex) { err = ex; }
+            finally { CloseOwnedSession(); }
         });
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
@@ -204,6 +207,7 @@ public sealed class HwpFeatureRefinementTests : IDisposable
                 catch (Exception ex) { _output.WriteLine("[FN-DOC-TEXT] ERR " + ex.Message.Split('\n')[0]); }
             }
             catch (Exception ex) { err = ex; }
+            finally { CloseOwnedSession(); }
         });
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
@@ -211,7 +215,11 @@ public sealed class HwpFeatureRefinementTests : IDisposable
         if (err is not null) throw err;
     }
 
-    public void Dispose()
+    /// <summary>
+    /// 소유 탭 닫기 + 소유 프로세스 Quit까지 STA 워커 스레드에서 수행한다.
+    /// 스레드 종료 뒤 MTA에서 호출하면 COM 아파트먼트가 사라져 조용히 실패한다.
+    /// </summary>
+    private void CloseOwnedSession()
     {
         try
         {
@@ -219,6 +227,181 @@ public sealed class HwpFeatureRefinementTests : IDisposable
                 HwpE2EOwnership.TryCloseDocumentById(_hwp, _createdTabId);
         }
         catch { }
+        try
+        {
+            // 소유 프로세스만 완전히 종료한다. 저장하지 않은 테스트 문서는 버린다.
+            // HWP 자동화에 Quit이 없으므로 증명된 소유 PID만 Kill한다(제품 Dispose와 동일 방식).
+            var pid = _claim?.ProcessId ?? 0;
+            if (_claim?.Mode == HwpE2EOwnershipMode.ExclusiveNewProcess && pid > 0)
+            {
+                try
+                {
+                    using var proc = System.Diagnostics.Process.GetProcessById(pid);
+                    proc.Kill();
+                    proc.WaitForExit(10000);
+                }
+                catch { }
+            }
+        }
+        catch { }
+        _createdTabId = "";
+    }
+
+    private static string TryReadProp(dynamic obj, string name)
+    {
+        try
+        {
+            var value = obj.GetType().InvokeMember(
+                name,
+                System.Reflection.BindingFlags.GetProperty,
+                null, obj, null);
+            return value?.ToString() ?? "<null>";
+        }
+        catch (Exception ex) { return "<ERR:" + ex.Message.Split('\n')[0] + ">"; }
+    }
+
+    [Fact]
+    public void ExploreTableBorderWidths()
+    {
+        if (!Enabled) return;
+        Exception? err = null;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                EnsureOwnedApp();
+                dynamic hwp = _hwp!;
+                dynamic act = hwp.HAction;
+                dynamic create = hwp.HParameterSet.HTableCreation;
+                act.GetDefault("TableCreate", create.HSet);
+                create.Rows = 3;
+                create.Cols = 3;
+                if (!(bool)act.Execute("TableCreate", create.HSet))
+                    throw new InvalidOperationException("border: table create failed");
+                dynamic border = hwp.HParameterSet.HCellBorderFill;
+                act.GetDefault("CellBorderFill", border.HSet);
+                _output.WriteLine("[BORDER-DEFAULTS] TypeTop={0} WidthTop={1} ColorTop={2} ApplyToEdge={3}",
+                    TryReadProp(border, "BorderTypeTop"), TryReadProp(border, "BorderWidthTop"),
+                    TryReadProp(border, "BorderColorTop"), TryReadProp(border, "ApplyBorderToEdge"));
+                try
+                {
+                    _output.WriteLine("[BORDER-LINE] Solid={0} W012={1} W05={2} W10={3}",
+                        hwp.HwpLineType("Solid"), hwp.HwpLineWidth("0.12mm"),
+                        hwp.HwpLineWidth("0.5mm"), hwp.HwpLineWidth("1.0mm"));
+                }
+                catch (Exception ex) { _output.WriteLine("[BORDER-LINE] ERR " + ex.Message.Split('\n')[0]); }
+                hwp.HAction.Run("TableCellBlock");
+                hwp.HAction.Run("TableCellBlockExtend");
+                hwp.HAction.Run("TableLowerCell");
+                hwp.HAction.Run("TableLowerCell");
+                hwp.HAction.Run("TableRightCell");
+                hwp.HAction.Run("TableRightCell");
+                dynamic b2 = hwp.HParameterSet.HCellBorderFill;
+                act.GetDefault("CellBorderFill", b2.HSet);
+                try
+                {
+                    b2.BorderTypeTop = hwp.HwpLineType("Solid");
+                    b2.BorderTypeBottom = hwp.HwpLineType("Solid");
+                    b2.BorderTypeLeft = hwp.HwpLineType("Solid");
+                    b2.BorderTypeRight = hwp.HwpLineType("Solid");
+                    b2.BorderWidthTop = hwp.HwpLineWidth("0.5mm");
+                    b2.BorderWidthBottom = hwp.HwpLineWidth("0.5mm");
+                    b2.BorderWidthLeft = hwp.HwpLineWidth("0.5mm");
+                    b2.BorderWidthRight = hwp.HwpLineWidth("0.5mm");
+                    _output.WriteLine("[BORDER-EXEC] ok=" + act.Execute("CellBorderFill", b2.HSet));
+                }
+                catch (Exception ex) { _output.WriteLine("[BORDER-EXEC] ERR " + ex.Message.Split('\n')[0]); }
+                try { hwp.HAction.Run("Cancel"); } catch { }
+                dynamic b3 = hwp.HParameterSet.HCellBorderFill;
+                act.GetDefault("CellBorderFill", b3.HSet);
+                _output.WriteLine("[BORDER-READBACK] TypeTop={0} WidthTop={1}",
+                    TryReadProp(b3, "BorderTypeTop"), TryReadProp(b3, "BorderWidthTop"));
+            }
+            catch (Exception ex) { err = ex; }
+            finally { CloseOwnedSession(); }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        if (!t.Join(TimeSpan.FromMinutes(5))) throw new TimeoutException("border explore timeout");
+        if (err is not null) throw err;
+    }
+
+    private static string PosKey(dynamic hwp)
+    {
+        try
+        {
+            dynamic set = hwp.CreateSet("ListParaPos");
+            if (!(bool)hwp.GetPosBySet(set)) return "<nopos>";
+            return $"{set.Item("List")}:{set.Item("Para")}:{set.Item("Pos")}";
+        }
+        catch (Exception ex) { return "<ERR:" + ex.Message.Split('\n')[0] + ">"; }
+    }
+
+    [Fact]
+    public void ExploreTableNavigationBounds()
+    {
+        if (!Enabled) return;
+        Exception? err = null;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                EnsureOwnedApp();
+                dynamic hwp = _hwp!;
+                dynamic act = hwp.HAction;
+                dynamic create = hwp.HParameterSet.HTableCreation;
+                act.GetDefault("TableCreate", create.HSet);
+                create.Rows = 3;
+                create.Cols = 4;
+                if (!(bool)act.Execute("TableCreate", create.HSet))
+                    throw new InvalidOperationException("nav: table create failed");
+                hwp.HAction.Run("MoveDocBegin");
+                // go to (0,0): move into table then up/left to edges
+                hwp.HAction.Run("TableCellBlock");
+                for (var i = 0; i < 5; i++) { try { hwp.HAction.Run("TableUpperCell"); } catch { } }
+                for (var i = 0; i < 6; i++) { try { hwp.HAction.Run("TableLeftCell"); } catch { } }
+                _output.WriteLine("[NAV-START] key=" + PosKey(hwp));
+                for (var i = 0; i < 5; i++)
+                {
+                    bool ok;
+                    try { ok = (bool)hwp.HAction.Run("TableLowerCell"); }
+                    catch (Exception ex) { _output.WriteLine($"[NAV-DOWN] {i}: THROW {ex.Message.Split('\n')[0]}"); break; }
+                    _output.WriteLine($"[NAV-DOWN] {i}: ok={ok} key=" + PosKey(hwp));
+                    if (!ok) break;
+                }
+                for (var i = 0; i < 5; i++) { try { hwp.HAction.Run("TableUpperCell"); } catch { } }
+                for (var i = 0; i < 6; i++) { try { hwp.HAction.Run("TableLeftCell"); } catch { } }
+                for (var i = 0; i < 6; i++)
+                {
+                    bool ok;
+                    try { ok = (bool)hwp.HAction.Run("TableRightCell"); }
+                    catch (Exception ex) { _output.WriteLine($"[NAV-RIGHT] {i}: THROW {ex.Message.Split('\n')[0]}"); break; }
+                    _output.WriteLine($"[NAV-RIGHT] {i}: ok={ok} key=" + PosKey(hwp));
+                    if (!ok) break;
+                }
+                // wrap-up test from (1,0)
+                for (var i = 0; i < 6; i++) { try { hwp.HAction.Run("TableLeftCell"); } catch { } }
+                try { hwp.HAction.Run("TableLowerCell"); } catch { }
+                _output.WriteLine("[NAV-ROW1] key=" + PosKey(hwp));
+                try
+                {
+                    var ok = (bool)hwp.HAction.Run("TableLeftCell");
+                    _output.WriteLine("[NAV-WRAPUP] ok=" + ok + " key=" + PosKey(hwp));
+                }
+                catch (Exception ex) { _output.WriteLine("[NAV-WRAPUP] THROW " + ex.Message.Split('\n')[0]); }
+            }
+            catch (Exception ex) { err = ex; }
+            finally { CloseOwnedSession(); }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        if (!t.Join(TimeSpan.FromMinutes(5))) throw new TimeoutException("nav explore timeout");
+        if (err is not null) throw err;
+    }
+
+    public void Dispose()
+    {
+        CloseOwnedSession();
         try
         {
             if (_hwp is not null && Marshal.IsComObject((object)_hwp))

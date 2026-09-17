@@ -150,6 +150,8 @@ public sealed class OperationValidator
             ["table_set_row_height"] = new[] { "tableIndex", "file", "documentRef" },
             ["table_set_row_heights"] = new[] { "tableIndex", "file", "documentRef" },
             ["table_set_repeat_header"] = new[] { "tableIndex", "repeat", "file", "documentRef" },
+            ["table_delete"] = new[] { "tableIndex", "file", "documentRef" },
+            ["table_set_borders"] = new[] { "tableIndex", "widthMm", "color", "file", "documentRef" },
             ["insert_footnote"] = new[] { "target", "file", "documentRef" },
             ["insert_endnote"] = new[] { "target", "file", "documentRef" },
             ["set_field_text"] = new[] { "file", "documentRef" },

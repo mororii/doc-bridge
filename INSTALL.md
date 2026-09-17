@@ -16,7 +16,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\package-release.
 `tools\Clear-DocBridgeReleaseCache.ps1`을 먼저 미리보기로 실행한 뒤 `-Apply`로 정리할 수 있으며,
 ZIP과 SHA-256 파일은 이 정리 대상에 포함되지 않습니다.
 
-생성 결과는 `releases\DocBridge-0.4.23-win-x64.zip`입니다. ZIP에는 .NET 8 `win-x64` 런타임, 한글 COM 격리 worker, Codex 플러그인/로컬 marketplace, Claude/Kimi/Cursor MCP 설정 병합기, 한글 보안 모듈 등록기, 진단기와 제거기가 모두 들어갑니다.
+생성 결과는 `releases\DocBridge-0.4.24-win-x64.zip`입니다. ZIP에는 .NET 8 `win-x64` 런타임, 한글 COM 격리 worker, Codex 플러그인/로컬 marketplace, Claude/Kimi/Cursor MCP 설정 병합기, 한글 보안 모듈 등록기, 진단기와 제거기가 모두 들어갑니다.
 
 새 PC에서 ZIP을 압축 해제하고 AI 클라이언트와 Office/CAD 프로그램을 종료한 뒤 실행합니다.
 
@@ -55,7 +55,7 @@ cd C:\Tools\DocBridge
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-mcp.ps1
 ```
 
-예상 버전은 `0.4.23`이며 검증 끝에 `모두 통과`가 나와야 합니다. 배포 무결성 검사에는 `doc-bridge-hwp-worker.exe`도 포함됩니다.
+예상 버전은 `0.4.24`이며 검증 끝에 `모두 통과`가 나와야 합니다. 배포 무결성 검사에는 `doc-bridge-hwp-worker.exe`도 포함됩니다.
 
 0.4.20부터 GstarCAD는 별도 `gstarcad_*` 도구 4개로 연결합니다. AutoCAD의 `cad_*`와 혼용하지 않습니다. 설치 후 AI를 완전히 재시작하고 새 작업에서 “GstarCAD 전용 도구로 열린 도면을 확인해 줘”라고 요청하세요. 기본 편집과 미지원 기능의 차이는 [GstarCAD 안내](docs/GSTARCAD.md)를 참고하세요. 이전 AI 세션의 도구 목록은 설치만으로 갱신되지 않습니다.
 

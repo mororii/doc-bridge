@@ -325,11 +325,30 @@ public static class RotHelper
     /// <summary>
     /// 사용자가 볼 수 있는 한글 최상위 창인지 확인한다. -Automation -Embedding으로
     /// 남은 숨은 인스턴스는 라이브 문서로 오인하지 않아야 한다.
+    /// 문서 창 핸들의 루트가 아니라 프로세스 주 창(MainWindow) 기준으로 판단한다.
+    /// 자동화 실행 Visible 창은 문서 창 루프가 보이지 않아도 주 창이 보이므로
+    /// 루트 기준으로는 살아 있는 창을 놓친다.
     /// </summary>
     public static bool HwpWindowVisible(object app)
     {
         try
         {
+            var docPane = HwpWindowHandle(app);
+            if (docPane != 0)
+            {
+                try
+                {
+                    var pid = ProcessIdFromWindowHandle(docPane);
+                    if (pid > 0)
+                    {
+                        using var process = System.Diagnostics.Process.GetProcessById(pid);
+                        var main = process.MainWindowHandle.ToInt64();
+                        if (main != 0) return IsWindow(new IntPtr(main)) && IsWindowVisible(new IntPtr(main));
+                        return false;
+                    }
+                }
+                catch { }
+            }
             var hwnd = RootWindow(new IntPtr(HwpWindowHandle(app)));
             return hwnd != IntPtr.Zero && IsWindow(hwnd) && IsWindowVisible(hwnd);
         }

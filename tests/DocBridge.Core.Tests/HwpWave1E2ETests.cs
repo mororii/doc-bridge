@@ -282,6 +282,22 @@ public sealed class HwpWave1E2ETests : IDisposable
             {
                 foreach (var id in _ownership.OwnedDocumentIds)
                     HwpE2EOwnership.TryCloseDocumentById(_createdApp, id);
+                // 소유 프로세스만 완전히 종료한다. 저장하지 않은 테스트 문서는 버린다.
+                // HWP 자동화에 Quit이 없으므로 증명된 소유 PID만 Kill한다(제품 Dispose와 동일 방식).
+                var pid = _ownership.ProcessId;
+                if (_ownership.Mode == HwpE2EOwnershipMode.ExclusiveNewProcess && pid > 0)
+                {
+                    try
+                    {
+                        using var proc = System.Diagnostics.Process.GetProcessById(pid);
+                        proc.Kill();
+                        proc.WaitForExit(10000);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine("HwpWave1E2E: owned kill reported: " + ex.Message);
+                    }
+                }
                 return null;
             });
         }

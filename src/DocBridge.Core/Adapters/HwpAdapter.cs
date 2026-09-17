@@ -124,6 +124,12 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
             return _attached;
         }
 
+        // 표시 창이 없으면 핀된 소유 인스턴스로 복귀한다. 홀더가 끝난 자동화
+        // 인스턴스는 창을 숨기므로 가시성 탐색에서 빠져 있지만 ROT에는 살아 있다.
+        // 핀 주인(만든 프로세스)이 아니므로 소유권 없이 공유로 연결한다.
+        var pinned = AttachPinnedHwp();
+        if (pinned is not null) return pinned;
+
         // Live-document tools must never launch a blank HWP process. Creating a private
         // automation instance is reserved for explicit file operations only.
         if (!allowCreate)
@@ -157,6 +163,50 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
         if (_attached is not null && _ownedProcessId == 0)
             _ownedProcessId = FindNewHwpProcessId(existingHwpProcesses);
         return _attached;
+    }
+
+    /// <summary>
+    /// 핀 파일이 가리키는 소유 인스턴스를 PID로 직접 찾아 연결한다.
+    /// 숨겨진 창은 다시 표시한다. 핀 주인이 아니므로 소유하지 않는다.
+    /// </summary>
+    private object? AttachPinnedHwp()
+    {
+        var pin = HwpInstancePin.TryLoadPin();
+        if (pin is null) return null;
+        if (!HwpInstancePin.TryValidatePin(pin))
+        {
+            HwpInstancePin.ClearPin();
+            return null;
+        }
+        foreach (var app in RotHelper.GetHwpApplications())
+        {
+            object? matched = null;
+            try
+            {
+                if (RotHelper.ProcessIdFromWindowHandle(RotHelper.HwpWindowHandle(app)) == pin.ProcessId)
+                    matched = app;
+            }
+            catch { }
+            if (matched is null)
+            {
+                RotHelper.ReleaseComObject(app);
+                continue;
+            }
+            try
+            {
+                dynamic hwp = matched;
+                try { hwp.XHwpWindows.Active_XHwpWindow.Visible = true; } catch { }
+            }
+            catch { }
+            if (_attached is not null && !ReferenceEquals(_attached, matched))
+                RotHelper.ReleaseComObject(_attached);
+            _attached = matched;
+            _ownsAttached = false;
+            _ownedProcessId = 0;
+            _connectionMode = "pinned-instance";
+            return _attached;
+        }
+        return null;
     }
 
     /// <summary>
@@ -207,6 +257,8 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
                 var processId = RotHelper.ProcessIdFromWindowHandle(windowHandle);
                 var documentRef = HwpDocumentRef(
                     fullName, documentId, windowHandle, processId);
+                if (_ownsAttached && _appFactory is null && processId > 0)
+                    _ = HwpInstancePin.TrySavePin(processId, windowHandle, "hwp_launch", out _);
 
                 return new JsonObject
                 {
@@ -1421,7 +1473,7 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
             "insert_table", "table_cell_set_text", "table_set_cells", "insert_picture", "insert_page_number",
             "set_header_footer_text", "table_insert_rows", "table_insert_columns",
             "table_delete_rows", "table_delete_columns", "table_merge_cells", "table_set_row_height", "table_set_row_heights",
-            "table_set_repeat_header", "insert_footnote", "insert_endnote",
+            "table_set_repeat_header", "insert_footnote", "insert_endnote", "table_delete", "table_set_borders",
             "set_field_text", "export_pdf"),
         ["limits"] = new JsonObject
         {
@@ -2209,6 +2261,26 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
                             p.Diff.Add(new DiffEntry { Ref = $"table:{tableIndex}/repeat-header", Before = "current", After = repeat ? "on" : "off" });
                             break;
                         }
+                        case "table_delete":
+                        {
+                            ValidateTableDelete(op);
+                            var tableIndex = Json.GetInt(op, "tableIndex") ?? 0;
+                            if (!PreviewTableExists(tableIndex)) p.Errors.Add($"표 {tableIndex}을 찾을 수 없습니다");
+                            p.Affected.Add(new AffectedRef($"table:{tableIndex}", "delete entire table"));
+                            p.Diff.Add(new DiffEntry { Ref = $"table:{tableIndex}", Before = "exists", After = "deleted" });
+                            break;
+                        }
+                        case "table_set_borders":
+                        {
+                            ValidateTableSetBorders(op);
+                            var tableIndex = Json.GetInt(op, "tableIndex") ?? 0;
+                            if (!PreviewTableExists(tableIndex)) p.Errors.Add($"표 {tableIndex}을 찾을 수 없습니다");
+                            _ = TryJsonNumber(op, "widthMm", out var widthMm);
+                            var edges = string.Join(",", ParseBorderEdges(op));
+                            p.Affected.Add(new AffectedRef($"table:{tableIndex}/borders:{edges}", $"set width {widthMm:0.##}mm"));
+                            p.Diff.Add(new DiffEntry { Ref = $"table:{tableIndex}/borders:{edges}", Before = "current", After = $"{widthMm:0.##}mm" });
+                            break;
+                        }
                         case "insert_footnote":
                         case "insert_endnote":
                         {
@@ -2722,6 +2794,24 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
                         case "table_set_repeat_header":
                         {
                             var result = ExecTableSetRepeatHeader(hwp, op);
+                            if (!result.Ok) { mismatches.Add(result.Detail); break; }
+                            checkedCount++;
+                            exec.Affected.Add(new AffectedRef(result.Ref, result.Detail));
+                            exec.Diff.Add(new DiffEntry { Ref = result.Ref, Before = result.Before, After = result.After });
+                            break;
+                        }
+                        case "table_delete":
+                        {
+                            var result = ExecTableDelete(hwp, op);
+                            if (!result.Ok) { mismatches.Add(result.Detail); break; }
+                            checkedCount++;
+                            exec.Affected.Add(new AffectedRef(result.Ref, result.Detail));
+                            exec.Diff.Add(new DiffEntry { Ref = result.Ref, Before = result.Before, After = result.After });
+                            break;
+                        }
+                        case "table_set_borders":
+                        {
+                            var result = ExecTableSetBorders(hwp, op);
                             if (!result.Ok) { mismatches.Add(result.Detail); break; }
                             checkedCount++;
                             exec.Affected.Add(new AffectedRef(result.Ref, result.Detail));
@@ -3269,6 +3359,8 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
         }
         _attached = null;
         base.Dispose();
+        // 핀은 지우지 않는다. 소유 프로세스가 죽으면 검증에서 탈락하고,
+        // 살아남으면 다음 프로세스가 핀으로 재연결한다.
         if (ownedProcessId > 0)
         {
             try

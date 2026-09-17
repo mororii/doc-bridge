@@ -16,6 +16,7 @@ public sealed class HwpFeatureExplorationTests : IDisposable
     private readonly ITestOutputHelper _output;
     private dynamic? _hwp;
     private string _createdTabId = "";
+    private HwpE2EOwnershipClaim? _claim;
 
     public HwpFeatureExplorationTests(ITestOutputHelper output) => _output = output;
 
@@ -38,8 +39,9 @@ public sealed class HwpFeatureExplorationTests : IDisposable
         if (!HwpE2EOwnership.TryReadInventory(hwp, out HwpE2EDocumentSnapshot after))
             throw new InvalidOperationException("explore: after-inventory failed");
         if (!HwpE2EOwnershipPolicy.TryProve(existing, pid, true, before, after,
-                out _, out var error))
+                out var exploreClaim, out var error))
             throw new InvalidOperationException("explore: ownership unproven: " + error);
+        _claim = exploreClaim;
         if (HwpE2EOwnershipPolicy.TryIdentifyCreatedTab(before, after, out var createdId))
             _createdTabId = createdId;
         _hwp = hwp;
@@ -115,6 +117,7 @@ public sealed class HwpFeatureExplorationTests : IDisposable
                     TryRead(ps2, "Emboss"), TryRead(ps2, "SmallCaps"), TryRead(ps2, "UseKerning"));
             }
             catch (Exception ex) { err = ex; }
+            finally { CloseOwnedSession(); }
         });
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
@@ -148,6 +151,7 @@ public sealed class HwpFeatureExplorationTests : IDisposable
                 _output.WriteLine("[PARA-LEVEL-READBACK] Level={0}", TryRead(ps2, "Level"));
             }
             catch (Exception ex) { err = ex; }
+            finally { CloseOwnedSession(); }
         });
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
@@ -191,6 +195,7 @@ public sealed class HwpFeatureExplorationTests : IDisposable
                 }
             }
             catch (Exception ex) { err = ex; }
+            finally { CloseOwnedSession(); }
         });
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
@@ -236,6 +241,7 @@ public sealed class HwpFeatureExplorationTests : IDisposable
                 _output.WriteLine("[TABLEPROP-REPEAT-EXEC] " + TryExecute(hwp, "TablePropertyDialog", shape.HSet));
             }
             catch (Exception ex) { err = ex; }
+            finally { CloseOwnedSession(); }
         });
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
@@ -243,7 +249,11 @@ public sealed class HwpFeatureExplorationTests : IDisposable
         if (err is not null) throw err;
     }
 
-    public void Dispose()
+    /// <summary>
+    /// 소유 탭 닫기 + 소유 프로세스 Quit까지 STA 워커 스레드에서 수행한다.
+    /// 스레드 종료 뒤 MTA에서 호출하면 COM 아파트먼트가 사라져 조용히 실패한다.
+    /// </summary>
+    private void CloseOwnedSession()
     {
         try
         {
@@ -251,6 +261,29 @@ public sealed class HwpFeatureExplorationTests : IDisposable
                 HwpE2EOwnership.TryCloseDocumentById(_hwp, _createdTabId);
         }
         catch { }
+        try
+        {
+            // 소유 프로세스만 완전히 종료한다. 저장하지 않은 테스트 문서는 버린다.
+            // HWP 자동화에 Quit이 없으므로 증명된 소유 PID만 Kill한다(제품 Dispose와 동일 방식).
+            var pid = _claim?.ProcessId ?? 0;
+            if (_claim?.Mode == HwpE2EOwnershipMode.ExclusiveNewProcess && pid > 0)
+            {
+                try
+                {
+                    using var proc = System.Diagnostics.Process.GetProcessById(pid);
+                    proc.Kill();
+                    proc.WaitForExit(10000);
+                }
+                catch { }
+            }
+        }
+        catch { }
+        _createdTabId = "";
+    }
+
+    public void Dispose()
+    {
+        CloseOwnedSession();
         try
         {
             if (_hwp is not null && Marshal.IsComObject((object)_hwp))

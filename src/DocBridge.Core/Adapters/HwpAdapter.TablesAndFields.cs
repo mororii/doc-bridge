@@ -711,6 +711,303 @@ public sealed partial class HwpAdapter
     }
 
     /// <summary>
+    /// 표 바깥 테두리 네 변의 굵기(와 선택 색상)를 지정한다. 행·열 내부는 건드리지
+    /// 않으며 적용 뒤 네 변과 내부 한 셀을 다시 읽어 검증한다.
+    /// 위치 키(GetPosBySet)가 동작하지 않는 환경에서도 되도록 아래쪽 이동 실패
+    /// 지점으로 행 수를 세고 전체 셀 수를 나누어 열 수를 구한다. 나누어떨어지지
+    /// 않는 표(병합 등)는 변경 없이 실패한다.
+    /// </summary>
+    private static HwpWriteResult ExecTableSetBorders(dynamic hwp, JsonObject op)
+    {
+        ValidateTableSetBorders(op);
+        var tableIndex = Json.GetInt(op, "tableIndex") ?? 0;
+        _ = TryJsonNumber(op, "widthMm", out var widthMm);
+        var colorText = Json.GetString(op, "color");
+        var reference = $"table:{tableIndex}/outer-borders";
+        if (!SelectTableCellBlock((object)hwp, tableIndex, 0, 0, out var selectError))
+            return new HwpWriteResult(false, reference, selectError);
+        var rows = 1;
+        while (rows < 2000)
+        {
+            bool moved;
+            try { moved = (bool)hwp.HAction.Run("TableLowerCell"); }
+            catch { break; }
+            if (!moved) break;
+            rows++;
+        }
+        if (rows >= 2000)
+            return new HwpWriteResult(false, reference, $"표 {tableIndex}의 행 수를 세지 못했습니다");
+        var tableControl = FindControl(hwp, "tbl", tableIndex);
+        var total = tableControl is null
+            ? null
+            : TryCountTableCellsOnControl((object)hwp, (object)tableControl, tableIndex);
+        if (total is null || total <= 0 || total % rows != 0)
+            return new HwpWriteResult(false, reference,
+                $"표 {tableIndex}의 셀 배치({total}/{rows})가 직사각형이 아닙니다. 병합 표의 외곽선은 지원하지 않습니다");
+        var cols = total.Value / rows;
+        int lineType;
+        int widthStep;
+        try
+        {
+            lineType = Convert.ToInt32(hwp.HwpLineType("Solid"));
+            widthStep = Convert.ToInt32(hwp.HwpLineWidth(
+                widthMm.ToString("0.0##", System.Globalization.CultureInfo.InvariantCulture) + "mm"));
+        }
+        catch (Exception ex)
+        {
+            return new HwpWriteResult(false, reference, $"테두리 굵기 변환 실패: {ex.Message.Split('\n')[0]}");
+        }
+        int? colorRef = colorText is { Length: > 0 } ? ToHwpColorRef(colorText) : null;
+
+        bool SetEdge(dynamic border, string edge)
+        {
+            switch (edge)
+            {
+                case "top":
+                    border.BorderTypeTop = lineType;
+                    border.BorderWidthTop = widthStep;
+                    if (colorRef is not null) border.BorderColorTop = colorRef.Value;
+                    break;
+                case "bottom":
+                    border.BorderTypeBottom = lineType;
+                    border.BorderWidthBottom = widthStep;
+                    if (colorRef is not null) border.BorderColorBottom = colorRef.Value;
+                    break;
+                case "left":
+                    border.BorderTypeLeft = lineType;
+                    border.BorderWidthLeft = widthStep;
+                    if (colorRef is not null) border.BorderCorlorLeft = colorRef.Value;
+                    break;
+                default:
+                    border.BorderTypeRight = lineType;
+                    border.BorderWidthRight = widthStep;
+                    if (colorRef is not null) border.BorderColorRight = colorRef.Value;
+                    break;
+            }
+            return (bool)hwp.HAction.Execute("CellBorderFill", border.HSet);
+        }
+
+        bool ApplyEdgeOnSelection(string edge)
+        {
+            dynamic border = hwp.HParameterSet.HCellBorderFill;
+            hwp.HAction.GetDefault("CellBorderFill", border.HSet);
+            var ok = SetEdge(border, edge);
+            try { hwp.HAction.Run("Cancel"); } catch { }
+            return ok;
+        }
+
+        int? ReadEdgeWidth(string edge)
+        {
+            try
+            {
+                dynamic border = hwp.HParameterSet.HCellBorderFill;
+                hwp.HAction.GetDefault("CellBorderFill", border.HSet);
+                object? raw = edge switch
+                {
+                    "top" => border.BorderWidthTop,
+                    "bottom" => border.BorderWidthBottom,
+                    "left" => border.BorderWidthLeft,
+                    _ => border.BorderWidthRight,
+                };
+                return Convert.ToInt32(raw);
+            }
+            catch { return null; }
+            finally { try { hwp.HAction.Run("Cancel"); } catch { } }
+        }
+
+        // 내부 대조값: 가운데 셀 윗변 굵기는 바뀌지 않아야 한다.
+        var midRow = rows / 2;
+        var midCol = cols / 2;
+        var edges = ParseBorderEdges(op);
+
+        int? ReadOuterEdge(string edge)
+        {
+            var selected = edge switch
+            {
+                "top" => SelectTableRowBlock((object)hwp, tableIndex, 0, out _),
+                "bottom" => SelectTableRowBlock((object)hwp, tableIndex, rows - 1, out _),
+                "left" => SelectTableCellBlock((object)hwp, tableIndex, 0, 0, out _),
+                _ => SelectTableCellBlock((object)hwp, tableIndex, 0, cols - 1, out _),
+            };
+            if (!selected) return null;
+            return ReadEdgeWidth(edge);
+        }
+
+        bool ApplyOuterEdge(string edge)
+        {
+            switch (edge)
+            {
+                case "top":
+                    if (!SelectTableRowBlock((object)hwp, tableIndex, 0, out _)) return false;
+                    break;
+                case "bottom":
+                    if (!SelectTableRowBlock((object)hwp, tableIndex, rows - 1, out _)) return false;
+                    break;
+                case "left":
+                    for (var r = 0; r < rows; r++)
+                    {
+                        if (!SelectTableCellBlock((object)hwp, tableIndex, r, 0, out _) ||
+                            !ApplyEdgeOnSelection("left"))
+                            return false;
+                    }
+                    return true;
+                default:
+                    for (var r = 0; r < rows; r++)
+                    {
+                        if (!SelectTableCellBlock((object)hwp, tableIndex, r, cols - 1, out _) ||
+                            !ApplyEdgeOnSelection("right"))
+                            return false;
+                    }
+                    return true;
+            }
+            return ApplyEdgeOnSelection(edge);
+        }
+
+        var before = new Dictionary<string, int?>();
+        foreach (var edge in new[] { "top", "right", "bottom", "left" })
+            before[edge] = ReadOuterEdge(edge);
+        if (!SelectTableCellBlock((object)hwp, tableIndex, midRow, midCol, out var midError))
+            return new HwpWriteResult(false, reference, midError);
+        var innerBefore = ReadEdgeWidth("top");
+
+        foreach (var edge in edges)
+        {
+            if (!ApplyOuterEdge(edge))
+                return new HwpWriteResult(false, reference, $"{edge} 변 적용 실패");
+        }
+
+        var after = new Dictionary<string, int?>();
+        foreach (var edge in new[] { "top", "right", "bottom", "left" })
+            after[edge] = ReadOuterEdge(edge);
+        if (!SelectTableCellBlock((object)hwp, tableIndex, midRow, midCol, out midError))
+            return new HwpWriteResult(false, reference, $"적용 후 내부 재선택 실패: {midError}");
+        var innerAfter = ReadEdgeWidth("top");
+        try { hwp.HAction.Run("Cancel"); } catch { }
+        try { hwp.HAction.Run("MoveDocBegin"); } catch { }
+
+        var mismatches = new List<string>();
+        foreach (var edge in new[] { "top", "right", "bottom", "left" })
+        {
+            if (edges.Contains(edge))
+            {
+                if (after[edge] != widthStep)
+                    mismatches.Add($"{edge}={after[edge]} expected={widthStep}");
+            }
+            else if (before[edge] is not null && after[edge] is not null && before[edge] != after[edge])
+            {
+                mismatches.Add($"{edge} changed {before[edge]}->{after[edge]}");
+            }
+        }
+        if (innerBefore is not null && innerAfter is not null && innerBefore != innerAfter)
+            mismatches.Add($"inner {innerBefore}->{innerAfter}");
+        var verified = mismatches.Count == 0;
+        return new HwpWriteResult(verified, reference,
+            verified ? $"borders [{string.Join(",", edges)}] {widthMm:0.##}mm verified"
+                : "border readback mismatch; " + string.Join("; ", mismatches),
+            null, $"{widthMm:0.##}mm");
+    }
+
+    internal static void ValidateTableDelete(JsonObject op)
+    {
+        if ((Json.GetInt(op, "tableIndex") ?? 0) < 0)
+            throw new ArgumentException("table_delete.tableIndex는 0 이상이어야 합니다");
+    }
+
+    internal static void ValidateTableSetBorders(JsonObject op)
+    {
+        if ((Json.GetInt(op, "tableIndex") ?? 0) < 0)
+            throw new ArgumentException("table_set_borders.tableIndex는 0 이상이어야 합니다");
+        if (!TryJsonNumber(op, "widthMm", out var width) || width is < 0.1 or > 5)
+            throw new ArgumentOutOfRangeException("widthMm", "table_set_borders.widthMm는 0.1~5mm입니다");
+        if (Json.GetString(op, "color") is { Length: > 0 } color) _ = ToHwpColorRef(color);
+        foreach (var edge in ParseBorderEdges(op))
+            _ = edge;
+    }
+
+    internal static IReadOnlyList<string> ParseBorderEdges(JsonObject op)
+    {
+        var node = Json.GetArr(op, "edges");
+        if (node is null) return new[] { "top", "right", "bottom", "left" };
+        if (node.Count == 0)
+            throw new ArgumentException("table_set_borders.edges가 비어 있습니다");
+        var edges = new List<string>(node.Count);
+        foreach (var item in node)
+        {
+            var edge = item is JsonValue value && value.TryGetValue<string>(out var name)
+                ? name.ToLowerInvariant()
+                : throw new ArgumentException("table_set_borders.edges는 top|right|bottom|left 문자열 배열이어야 합니다");
+            if (edge is not ("top" or "right" or "bottom" or "left"))
+                throw new ArgumentException("table_set_borders.edges는 top|right|bottom|left 중이어야 합니다");
+            if (!edges.Contains(edge)) edges.Add(edge);
+        }
+        return edges;
+    }
+
+    private static int CountTables(object hwpObject) => FindControls(hwpObject, "tbl").Count;
+
+    private static int CountPictures(object hwpObject)
+    {
+        try
+        {
+            dynamic hwp = hwpObject;
+            var count = 0;
+            dynamic? ctrl = null;
+            try { ctrl = hwp.HeadCtrl; } catch { }
+            var guard = 0;
+            while (ctrl is not null && guard++ < 20000)
+            {
+                try
+                {
+                    var id = Convert.ToString(ctrl.CtrlID) ?? "";
+                    if (string.Equals(id, "gso", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(id, "$pic", StringComparison.OrdinalIgnoreCase))
+                        count++;
+                }
+                catch { }
+                try { ctrl = ctrl.Next; } catch { ctrl = null; }
+            }
+            return count;
+        }
+        catch { return -1; }
+    }
+
+    /// <summary>
+    /// 표 컨트롤 자체를 선택해 삭제한다. 행·열 삭제와 달리 컨트롤이 없어져야 하며
+    /// 표 개수 -1과 그림 개수 불변으로 잘못된 대상 삭제를 방지한다.
+    /// 병합 여부와 무관하므로 논리 행·열 읽기가 필요 없다.
+    /// </summary>
+    private static HwpWriteResult ExecTableDelete(dynamic hwp, JsonObject op)
+    {
+        ValidateTableDelete(op);
+        var tableIndex = Json.GetInt(op, "tableIndex") ?? 0;
+        var reference = $"table:{tableIndex}";
+        dynamic? table = FindControl(hwp, "tbl", tableIndex);
+        if (table is null)
+            return new HwpWriteResult(false, reference, $"표 {tableIndex}을 찾을 수 없습니다");
+        var beforeTables = CountTables((object)hwp);
+        var beforePictures = CountPictures((object)hwp);
+        try
+        {
+            if (!(bool)hwp.SetPosBySet(((dynamic)table).GetAnchorPos(0)))
+                return new HwpWriteResult(false, reference, $"표 {tableIndex}의 기준 위치로 이동하지 못했습니다");
+            if (!(bool)hwp.HAction.Run("SelectCtrlFront"))
+                return new HwpWriteResult(false, reference, $"표 {tableIndex} 컨트롤을 선택하지 못했습니다");
+            if (!(bool)hwp.HAction.Run("Delete"))
+                return new HwpWriteResult(false, reference, $"표 {tableIndex} 삭제 실행 실패");
+        }
+        finally { try { hwp.HAction.Run("Cancel"); } catch { } }
+        var afterTables = CountTables((object)hwp);
+        var afterPictures = CountPictures((object)hwp);
+        var picturesKept = beforePictures < 0 || afterPictures < 0 || beforePictures == afterPictures;
+        var verified = afterTables == beforeTables - 1 && picturesKept;
+        try { hwp.HAction.Run("MoveDocBegin"); } catch { }
+        return new HwpWriteResult(verified, reference,
+            verified ? $"deleted table {tableIndex} ({beforeTables}->{afterTables})"
+                : $"table delete readback mismatch; tables {beforeTables}->{afterTables}, pictures {beforePictures}->{afterPictures}",
+            beforeTables.ToString(), afterTables.ToString());
+    }
+
+    /// <summary>
     /// 첫 일치 문구를 선택 상태로 만든다. RepeatFind는 찾은 문자열을 선택하므로
     /// 각주/미주 삽입 위치를 문구 기준으로 지정할 수 있다. occurrence는 지원하지 않으며
     /// 항상 문서 처음부터의 첫 일치를 사용한다.

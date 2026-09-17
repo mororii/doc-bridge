@@ -13,9 +13,9 @@
       "forbiddenOps": ["overwrite_workbook_without_backup", "run_macro"]
     },
     "hwp": {
-      "writeOps": ["insert_text", "append_text", "insert_before_text", "insert_after_text", "replace_document_text", "replace_selection", "find_replace", "set_paragraph_style_basic", "set_paragraph_format", "format_paragraphs", "set_page_setup", "insert_break", "insert_table", "table_cell_set_text", "table_set_cells", "table_insert_rows", "table_insert_columns", "table_merge_cells", "table_set_row_height", "table_set_row_heights", "table_set_repeat_header", "insert_footnote", "insert_endnote", "insert_picture", "insert_page_number", "set_header_footer_text", "set_field_text"],
+      "writeOps": ["insert_text", "append_text", "insert_before_text", "insert_after_text", "replace_document_text", "replace_selection", "find_replace", "set_paragraph_style_basic", "set_paragraph_format", "format_paragraphs", "set_page_setup", "insert_break", "insert_table", "table_cell_set_text", "table_set_cells", "table_insert_rows", "table_insert_columns", "table_merge_cells", "table_set_row_height", "table_set_row_heights", "table_set_repeat_header", "table_set_borders", "insert_footnote", "insert_endnote", "insert_picture", "insert_page_number", "set_header_footer_text", "set_field_text"],
       "autoExecuteOps": ["append_text", "insert_before_text", "insert_after_text", "table_cell_set_text", "table_set_cells", "set_field_text", "set_paragraph_format", "set_paragraph_style_basic", "format_paragraphs"],
-      "highRiskOps": ["table_delete_rows", "table_delete_columns", "export_pdf"],
+      "highRiskOps": ["table_delete_rows", "table_delete_columns", "table_delete", "export_pdf"],
       "forbiddenOps": ["save_overwrite_without_backup", "run_external_macro"]
     },
     "cad": {

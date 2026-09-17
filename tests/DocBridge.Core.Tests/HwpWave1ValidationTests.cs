@@ -82,4 +82,32 @@ public sealed class HwpWave1ValidationTests
         Assert.Throws<ArgumentException>(() =>
             HwpAdapter.ValidateTableSetRepeatHeader(Obj("""{"tableIndex":-1}""")));
     }
+
+    [Fact]
+    public void Borders_require_width_in_range()
+    {
+        HwpAdapter.ValidateTableSetBorders(Obj("""{"widthMm":0.5}"""));
+        HwpAdapter.ValidateTableSetBorders(Obj("""{"tableIndex":1,"widthMm":1.0,"color":"#000000"}"""));
+        HwpAdapter.ValidateTableSetBorders(Obj("""{"widthMm":0.5,"edges":["right","bottom"]}"""));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            HwpAdapter.ValidateTableSetBorders(Obj("""{"widthMm":0.05}""")));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            HwpAdapter.ValidateTableSetBorders(Obj("""{"widthMm":6}""")));
+        Assert.Throws<ArgumentException>(() =>
+            HwpAdapter.ValidateTableSetBorders(Obj("""{"widthMm":0.5,"color":"black"}""")));
+        Assert.Throws<ArgumentException>(() =>
+            HwpAdapter.ValidateTableSetBorders(Obj("""{"tableIndex":-1,"widthMm":0.5}""")));
+        Assert.Throws<ArgumentException>(() =>
+            HwpAdapter.ValidateTableSetBorders(Obj("""{"widthMm":0.5,"edges":[]}""")));
+        Assert.Throws<ArgumentException>(() =>
+            HwpAdapter.ValidateTableSetBorders(Obj("""{"widthMm":0.5,"edges":["diagonal"]}""")));
+    }
+
+    [Fact]
+    public void Table_delete_rejects_negative_table_index()
+    {
+        HwpAdapter.ValidateTableDelete(Obj("""{}"""));
+        Assert.Throws<ArgumentException>(() =>
+            HwpAdapter.ValidateTableDelete(Obj("""{"tableIndex":-2}""")));
+    }
 }

@@ -407,6 +407,9 @@ public class HwpE2ETests : IDisposable
     {
         if (!Enabled) return;
         using var host = CreateHostWithHwp();
+        // 팩토리는 지연 실행되므로 소유 세션을 먼저 열어 둔다.
+        var context = FirstActiveContext(host);
+        Assert.True(Json.GetBool(context, "ok"), $"first context failed: {context}");
         JsonObject? first = null;
         TryRecordExactCreatedDocuments(() =>
         {
@@ -1471,6 +1474,24 @@ public class HwpE2ETests : IDisposable
                 if (plan.RetainedUnknownDocumentIds.Count > 0)
                     Console.Error.WriteLine("HwpE2E: retained unknown tabs: " +
                                            string.Join(", ", plan.RetainedUnknownDocumentIds));
+
+                // 소유 프로세스(ExclusiveNewProcess)만 완전히 종료해 창이 쌓이지 않게 한다.
+                // 저장하지 않은 테스트 문서는 버린다. HWP 자동화에 Quit이 없으므로
+                // 증명된 소유 PID만 Kill한다(제품 Dispose와 동일 방식).
+                // 기존 창 재사용 모드에서는 종료하지 않는다.
+                if (_ownership?.Mode == HwpE2EOwnershipMode.ExclusiveNewProcess && _createdProcessId > 0)
+                {
+                    try
+                    {
+                        using var proc = System.Diagnostics.Process.GetProcessById(_createdProcessId);
+                        proc.Kill();
+                        proc.WaitForExit(10000);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine("HwpE2E: owned kill reported: " + ex.Message);
+                    }
+                }
 
                 return null;
             });

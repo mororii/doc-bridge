@@ -18,6 +18,7 @@ public sealed class HwpCapabilityProbeTests : IDisposable
     private readonly ITestOutputHelper _output;
     private dynamic? _hwp;
     private string _createdTabId = "";
+    private HwpE2EOwnershipClaim? _claim;
     private bool _disposed;
 
     public HwpCapabilityProbeTests(ITestOutputHelper output) => _output = output;
@@ -94,8 +95,9 @@ public sealed class HwpCapabilityProbeTests : IDisposable
         if (!HwpE2EOwnership.TryReadInventory(hwp, out HwpE2EDocumentSnapshot after))
             throw new InvalidOperationException("probe: after-inventory failed");
         if (!HwpE2EOwnershipPolicy.TryProve(existing, pid, true, before, after,
-                out _, out var error))
+                out var claim, out var error))
             throw new InvalidOperationException("probe: ownership unproven: " + error);
+        _claim = claim;
         if (HwpE2EOwnershipPolicy.TryIdentifyCreatedTab(before, after, out var createdId))
             _createdTabId = createdId;
         _hwp = hwp;
@@ -127,6 +129,7 @@ public sealed class HwpCapabilityProbeTests : IDisposable
         {
             try { RunProbe(); }
             catch (Exception ex) { workerError = ex; }
+            finally { CloseOwnedSession(); }
         });
         worker.SetApartmentState(ApartmentState.STA);
         worker.Start();
@@ -167,16 +170,43 @@ public sealed class HwpCapabilityProbeTests : IDisposable
         _output.WriteLine("[PROBE-DONE]");
     }
 
-    public void Dispose()
+    /// <summary>
+    /// 소유 탭 닫기 + 소유 프로세스 Quit까지 STA 워커 스레드에서 수행한다.
+    /// 스레드 종료 뒤 MTA에서 호출하면 COM 아파트먼트가 사라져 조용히 실패한다.
+    /// </summary>
+    private void CloseOwnedSession()
     {
-        if (_disposed) return;
-        _disposed = true;
         try
         {
             if (_hwp is not null && !string.IsNullOrEmpty(_createdTabId))
                 HwpE2EOwnership.TryCloseDocumentById(_hwp, _createdTabId);
         }
         catch { }
+        try
+        {
+            // 소유 프로세스만 완전히 종료한다. 저장하지 않은 테스트 문서는 버린다.
+            // HWP 자동화에 Quit이 없으므로 증명된 소유 PID만 Kill한다(제품 Dispose와 동일 방식).
+            var pid = _claim?.ProcessId ?? 0;
+            if (_claim?.Mode == HwpE2EOwnershipMode.ExclusiveNewProcess && pid > 0)
+            {
+                try
+                {
+                    using var proc = System.Diagnostics.Process.GetProcessById(pid);
+                    proc.Kill();
+                    proc.WaitForExit(10000);
+                }
+                catch { }
+            }
+        }
+        catch { }
+        _createdTabId = "";
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        CloseOwnedSession();
         try
         {
             if (_hwp is not null && Marshal.IsComObject((object)_hwp))

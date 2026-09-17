@@ -6,6 +6,8 @@ DocBridge 0.4의 한글 작업은 화면 좌표나 스크립트 매크로를 사
 
 현재 `autoExecuteOps`는 `append_text`, `insert_before_text`, `insert_after_text`, `table_cell_set_text`, `table_set_cells`, `set_field_text`, `set_paragraph_format`, `set_paragraph_style_basic`, `format_paragraphs`다. 정확한 목록은 `ops/policies/default.policy.json`과 `core_get_capabilities({"app":"hwp"})`를 따른다. `insert_text`는 execute 대상이 아니다. execute는 UUID `requestId`와 반환된 `documentRef`/`instanceRef`(또는 절대 `file`)를 `expectedDocumentRef`로 쓰며 `dryRun`/`confirmToken`/`highRiskConfirm`을 포함하지 않는다. 미리보기·표 삭제·PDF·그 밖의 writeOps는 기존 dry-run → 같은 ops/`confirmToken`이다.
 
+소유 인스턴스 핀: `hwp_launch`가 만든 자동화 HWP의 PID를 `%LOCALAPPDATA%\DocBridge\hwp-instance-pin.json`에 기록한다. 표시 창이 없으면 핀 PID로 직접 재연결하고 숨은 창을 다시 표시한다. 핀 주인이 아니므로 소유하지 않는다.
+
 ## 공통 호출
 
 - 새 문서 경로 결정: 파일이나 창을 만들기 전에 `hwp_plan_creation`을 호출한다. 새 일반 문서는 `docx-first`, 기존 HWP/HWPX·한글 템플릿·필드·복잡한 병합표·한글 전용 개체·원본 배치 보존은 `native-hwp`를 사용한다.
@@ -94,6 +96,12 @@ DOCX 우선 새 문서 예시:
 ### `insert_footnote` / `insert_endnote`
 
 `text`(필수)를 주석 내용으로 입력한다. `target.text`가 있으면 문서 처음부터의 첫 일치 문구를 선택해 그 위치에 달고(occurrence 미지원), 없으면 현재 커서/선택 위치에 단다. 각주는 `fn`, 미주는 `en` 컨트롤 수 +1로 검증하며 삽입 뒤 캐럿은 문서 시작으로 복귀한다. dry-run이 아닌 배치에서는 `confirmToken`이 필요하다.
+
+### `table_delete` / `table_set_borders`
+
+`table_delete`는 `{tableIndex}` 표 전체를 삭제하고 표 개수 -1로 검증한다. 행·열 삭제와 달리 컨트롤 자체가 없어지며 병합 표도 삭제된다. 구조 파괴적이므로 high-risk다.
+
+`table_set_borders`는 `{tableIndex, widthMm(0.1~5), color?(#RRGGBB), edges?(top|right|bottom|left)}`로 바깥 테두리 굵기를 지정한다. 내부는 건드리지 않고 네 변과 내부 한 셀을 재조회로 대조 검증한다. 직사각형이 아닌 표는 변경 없이 실패한다. 굵기 문자열은 소수점을 붙인다(`"1.0mm"`, `"1mm"`은 E_FAIL).
 
 ### `insert_picture`
 
