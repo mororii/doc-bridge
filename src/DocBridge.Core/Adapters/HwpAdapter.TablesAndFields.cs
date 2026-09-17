@@ -696,4 +696,148 @@ public sealed partial class HwpAdapter
             ["valuesIncluded"] = includeValues,
         };
     }
+
+    internal static void ValidateFootnote(JsonObject op, bool endnote)
+    {
+        var name = endnote ? "insert_endnote" : "insert_footnote";
+        if (string.IsNullOrWhiteSpace(Json.GetString(op, "text")))
+            throw new ArgumentException($"{name}.text가 필요합니다");
+    }
+
+    internal static void ValidateTableSetRepeatHeader(JsonObject op)
+    {
+        if ((Json.GetInt(op, "tableIndex") ?? 0) < 0)
+            throw new ArgumentException("table_set_repeat_header.tableIndex는 0 이상이어야 합니다");
+    }
+
+    /// <summary>
+    /// 첫 일치 문구를 선택 상태로 만든다. RepeatFind는 찾은 문자열을 선택하므로
+    /// 각주/미주 삽입 위치를 문구 기준으로 지정할 수 있다. occurrence는 지원하지 않으며
+    /// 항상 문서 처음부터의 첫 일치를 사용한다.
+    /// </summary>
+    private static bool SelectFirstTextMatch(dynamic hwp, string targetText)
+    {
+        if (string.IsNullOrEmpty(targetText)) return false;
+        int? previousMessageMode = null;
+        try
+        {
+            try { previousMessageMode = Convert.ToInt32(hwp.GetMessageBoxMode()); } catch { }
+            try { hwp.SetMessageBoxMode(0x2FFF1); } catch { }
+            hwp.HAction.Run("MoveDocBegin");
+            dynamic act = hwp.HAction;
+            dynamic find = hwp.HParameterSet.HFindReplace;
+            act.GetDefault("FindDlg", find.HSet);
+            _ = act.Execute("FindDlg", find.HSet);
+            find = hwp.HParameterSet.HFindReplace;
+            try { find.MatchCase = 1; } catch { }
+            try { find.SeveralWords = 0; } catch { }
+            try { find.UseWildCards = 0; } catch { }
+            try { find.WholeWordOnly = 0; } catch { }
+            try { find.AutoSpell = 0; } catch { }
+            try { find.Direction = hwp.FindDir("Forward"); } catch { }
+            find.FindString = targetText;
+            try { find.IgnoreMessage = 1; } catch { }
+            try { find.FindRegExp = 0; } catch { }
+            try { find.FindType = 1; } catch { }
+            return (bool)act.Execute("RepeatFind", find.HSet);
+        }
+        finally
+        {
+            try { hwp.SetMessageBoxMode(previousMessageMode ?? 0xFFFFF); } catch { }
+        }
+    }
+
+    private static int CountNoteControls(object hwpObject, string controlId) =>
+        FindControls(hwpObject, controlId).Count;
+
+    /// <summary>
+    /// 각주(InsertFootnote/fn) 또는 미주(InsertEndnote/en)를 삽입하고 내용을 입력한다.
+    /// 삽입 후 캐럿은 주석 영역에 있으므로 내용을 입력한 뒤 문서 시작으로 복귀한다.
+    /// </summary>
+    private static HwpWriteResult ExecInsertNote(dynamic hwp, JsonObject op, bool endnote)
+    {
+        var name = endnote ? "insert_endnote" : "insert_footnote";
+        var controlId = endnote ? "en" : "fn";
+        var action = endnote ? "InsertEndnote" : "InsertFootnote";
+        ValidateFootnote(op, endnote);
+        var text = Json.GetString(op, "text")!;
+        var targetText = Json.GetString(Json.GetObj(op, "target"), "text");
+        if (!string.IsNullOrEmpty(targetText) && !SelectFirstTextMatch(hwp, targetText))
+            return new HwpWriteResult(false, $"{name}:anchor", $"각주 대상 문구가 없습니다: '{targetText}'");
+        var before = CountNoteControls((object)hwp, controlId);
+        dynamic shape = hwp.HParameterSet.HFootnoteShape;
+        hwp.HAction.GetDefault(action, shape.HSet);
+        if (!(bool)hwp.HAction.Execute(action, shape.HSet))
+            return new HwpWriteResult(false, name, $"{action} 실행 실패", before.ToString(), null);
+        dynamic insert = hwp.HParameterSet.HInsertText;
+        hwp.HAction.GetDefault("InsertText", insert.HSet);
+        insert.Text = text;
+        if (!(bool)hwp.HAction.Execute("InsertText", insert.HSet))
+            return new HwpWriteResult(false, name, "주석 내용 입력 실패", before.ToString(), null);
+        try { hwp.HAction.Run("MoveDocBegin"); } catch { }
+        var after = CountNoteControls((object)hwp, controlId);
+        var verified = after == before + 1;
+        return new HwpWriteResult(verified, $"{name}:{controlId}",
+            verified ? $"{name} inserted ({before}->{after})" : $"{name} readback mismatch; notes {before}->{after}",
+            before.ToString(), after.ToString());
+    }
+
+    private static HwpWriteResult ExecInsertFootnote(dynamic hwp, JsonObject op) =>
+        ExecInsertNote(hwp, op, endnote: false);
+
+    private static HwpWriteResult ExecInsertEndnote(dynamic hwp, JsonObject op) =>
+        ExecInsertNote(hwp, op, endnote: true);
+
+    private static bool? TryReadRepeatHeader(object hwpObject, int tableIndex)
+    {
+        try
+        {
+            dynamic hwp = hwpObject;
+            if (!SelectTableCellBlock(hwpObject, tableIndex, 0, 0, out _)) return null;
+            try { hwp.HAction.Run("TableCellBlockExtend"); } catch { }
+            dynamic shape = hwp.HParameterSet.HShapeObject;
+            try { hwp.HAction.GetDefault("TablePropertyDialog", shape.HSet); }
+            catch { return null; }
+            try
+            {
+                var value = Convert.ToInt32(shape.RepeatHeader) != 0;
+                try { hwp.HAction.Run("Cancel"); } catch { }
+                return value;
+            }
+            catch { return null; }
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// 표 첫 행을 각 페이지에 반복하는 표제행 옵션. TablePropertyDialog/ShapeTableCell 경로가
+    /// 아니라 표 개체(HShapeObject.RepeatHeader) 경로이며 적용 뒤 재선택·재조회로 검증한다.
+    /// </summary>
+    private static HwpWriteResult ExecTableSetRepeatHeader(dynamic hwp, JsonObject op)
+    {
+        ValidateTableSetRepeatHeader(op);
+        var tableIndex = Json.GetInt(op, "tableIndex") ?? 0;
+        var repeat = Json.GetBool(op, "repeat", true);
+        var reference = $"table:{tableIndex}/repeat-header";
+        if (!SelectTableCellBlock((object)hwp, tableIndex, 0, 0, out var error))
+            return new HwpWriteResult(false, reference, error);
+        var before = TryReadRepeatHeader((object)hwp, tableIndex);
+        dynamic shape = hwp.HParameterSet.HShapeObject;
+        hwp.HAction.GetDefault("TablePropertyDialog", shape.HSet);
+        shape.RepeatHeader = repeat ? 1 : 0;
+        var executed = (bool)hwp.HAction.Execute("TablePropertyDialog", shape.HSet);
+        try { hwp.HAction.Run("Cancel"); } catch { }
+        if (!executed)
+            return new HwpWriteResult(false, reference, "TablePropertyDialog 실행 실패",
+                before?.ToString(), repeat.ToString());
+        if (!SelectTableCellBlock((object)hwp, tableIndex, 0, 0, out error))
+            return new HwpWriteResult(false, reference, $"적용 후 표 재선택 실패: {error}",
+                before?.ToString(), null);
+        var after = TryReadRepeatHeader((object)hwp, tableIndex);
+        try { hwp.HAction.Run("Cancel"); } catch { }
+        var verified = after == repeat;
+        return new HwpWriteResult(verified, reference,
+            verified ? $"repeat header {(repeat ? "on" : "off")} verified" : $"repeat header readback mismatch; expected={repeat}, actual={after}",
+            before?.ToString(), after?.ToString());
+    }
 }

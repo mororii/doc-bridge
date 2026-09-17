@@ -1292,6 +1292,20 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
             ps.SuperScript = superscript.GetValue<bool>();
         if (style.TryGetPropertyValue("subscript", out var subscript) && subscript is not null)
             ps.SubScript = subscript.GetValue<bool>();
+        if (style.TryGetPropertyValue("outline", out var outline) && outline is not null)
+            ps.OutLineType = outline.GetValue<bool>() ? 1 : 0;
+        if (style.TryGetPropertyValue("shadow", out var shadow) && shadow is not null)
+            ps.ShadowType = shadow.GetValue<bool>() ? 1 : 0;
+        if (Json.GetString(style, "shadowColor") is { Length: > 0 } shadowColor)
+            ps.ShadowColor = ToHwpColorRef(shadowColor);
+        if (style.TryGetPropertyValue("emboss", out var emboss) && emboss is not null)
+            ps.Emboss = emboss.GetValue<bool>();
+        if (style.TryGetPropertyValue("engrave", out var engrave) && engrave is not null)
+            ps.Engrave = engrave.GetValue<bool>();
+        if (style.TryGetPropertyValue("smallCaps", out var smallCaps) && smallCaps is not null)
+            ps.SmallCaps = smallCaps.GetValue<bool>();
+        if (style.TryGetPropertyValue("kerning", out var kerning) && kerning is not null)
+            ps.UseKerning = kerning.GetValue<bool>();
         return (bool)act.Execute("CharShape", ps.HSet);
     }
 
@@ -1407,6 +1421,7 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
             "insert_table", "table_cell_set_text", "table_set_cells", "insert_picture", "insert_page_number",
             "set_header_footer_text", "table_insert_rows", "table_insert_columns",
             "table_delete_rows", "table_delete_columns", "table_merge_cells", "table_set_row_height", "table_set_row_heights",
+            "table_set_repeat_header", "insert_footnote", "insert_endnote",
             "set_field_text", "export_pdf"),
         ["limits"] = new JsonObject
         {
@@ -2184,6 +2199,37 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
                             p.Diff.Add(new DiffEntry { Ref = $"field:{fieldName}", Before = "current", After = Json.GetString(op, "text") ?? "" });
                             break;
                         }
+                        case "table_set_repeat_header":
+                        {
+                            ValidateTableSetRepeatHeader(op);
+                            var tableIndex = Json.GetInt(op, "tableIndex") ?? 0;
+                            var repeat = Json.GetBool(op, "repeat", true);
+                            if (!PreviewTableExists(tableIndex)) p.Errors.Add($"표 {tableIndex}을 찾을 수 없습니다");
+                            p.Affected.Add(new AffectedRef($"table:{tableIndex}/repeat-header", repeat ? "repeat on" : "repeat off"));
+                            p.Diff.Add(new DiffEntry { Ref = $"table:{tableIndex}/repeat-header", Before = "current", After = repeat ? "on" : "off" });
+                            break;
+                        }
+                        case "insert_footnote":
+                        case "insert_endnote":
+                        {
+                            var endnotePreview = name == "insert_endnote";
+                            ValidateFootnote(op, endnotePreview);
+                            var noteKind = endnotePreview ? "endnote" : "footnote";
+                            var target = Json.GetObj(op, "target");
+                            var targetText = Json.GetString(target, "text");
+                            if (!string.IsNullOrEmpty(targetText))
+                            {
+                                var (count, _) = CountMatches(PreviewDocumentText(), targetText, targetText, 0);
+                                if (count == 0) p.Warnings.Add($"주석 대상 문구가 없습니다: '{targetText}'");
+                                p.Affected.Add(new AffectedRef(noteKind, $"anchor: {targetText}"));
+                            }
+                            else
+                            {
+                                p.Affected.Add(new AffectedRef(noteKind, "current selection/position"));
+                            }
+                            p.Diff.Add(new DiffEntry { Ref = noteKind, Before = "none", After = Json.GetString(op, "text") ?? "" });
+                            break;
+                        }
                         case "insert_picture":
                         {
                             ValidatePicture(op);
@@ -2667,6 +2713,33 @@ public sealed partial class HwpAdapter : ComAdapterBase, IHwpAutomationAdapter, 
                         case "set_field_text":
                         {
                             var result = ExecSetFieldText(hwp, op);
+                            if (!result.Ok) { mismatches.Add(result.Detail); break; }
+                            checkedCount++;
+                            exec.Affected.Add(new AffectedRef(result.Ref, result.Detail));
+                            exec.Diff.Add(new DiffEntry { Ref = result.Ref, Before = result.Before, After = result.After });
+                            break;
+                        }
+                        case "table_set_repeat_header":
+                        {
+                            var result = ExecTableSetRepeatHeader(hwp, op);
+                            if (!result.Ok) { mismatches.Add(result.Detail); break; }
+                            checkedCount++;
+                            exec.Affected.Add(new AffectedRef(result.Ref, result.Detail));
+                            exec.Diff.Add(new DiffEntry { Ref = result.Ref, Before = result.Before, After = result.After });
+                            break;
+                        }
+                        case "insert_footnote":
+                        {
+                            var result = ExecInsertFootnote(hwp, op);
+                            if (!result.Ok) { mismatches.Add(result.Detail); break; }
+                            checkedCount++;
+                            exec.Affected.Add(new AffectedRef(result.Ref, result.Detail));
+                            exec.Diff.Add(new DiffEntry { Ref = result.Ref, Before = result.Before, After = result.After });
+                            break;
+                        }
+                        case "insert_endnote":
+                        {
+                            var result = ExecInsertEndnote(hwp, op);
                             if (!result.Ok) { mismatches.Add(result.Detail); break; }
                             checkedCount++;
                             exec.Affected.Add(new AffectedRef(result.Ref, result.Detail));

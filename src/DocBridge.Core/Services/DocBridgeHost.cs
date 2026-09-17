@@ -19,7 +19,7 @@ namespace DocBridge.Core.Services;
 /// </summary>
 public sealed partial class DocBridgeHost : IDisposable
 {
-    public const string Version = "0.4.22";
+    public const string Version = "0.4.23";
     public const string AutomationMutexPrefix = @"Global\DocBridge.Automation";
 
     private readonly DocBridgeOptions _options;

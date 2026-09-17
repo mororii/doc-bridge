@@ -101,6 +101,12 @@ public sealed partial class HwpAdapter
         if (style.TryGetPropertyValue("keepWithNext", out var keepNext) && keepNext is not null) shape.KeepWithNext = keepNext.GetValue<bool>();
         if (style.TryGetPropertyValue("keepLinesTogether", out var keepLines) && keepLines is not null) shape.KeepLinesTogether = keepLines.GetValue<bool>();
         if (style.TryGetPropertyValue("pageBreakBefore", out var pageBreak) && pageBreak is not null) shape.PagebreakBefore = pageBreak.GetValue<bool>();
+        if (style.TryGetPropertyValue("level", out var level) && level is not null)
+        {
+            var levelValue = level.GetValue<int>();
+            if (levelValue is < 0 or > 9) throw new ArgumentOutOfRangeException(nameof(levelValue), "level은 0~9입니다");
+            shape.Level = levelValue;
+        }
         return (bool)action.Execute("ParagraphShape", shape.HSet);
     }
 
@@ -288,6 +294,14 @@ public sealed partial class HwpAdapter
         if (TryPageLength((object)hwp, page, "headerMm", out var headerLength)) def.HeaderLen = headerLength;
         if (TryPageLength((object)hwp, page, "footerMm", out var footerLength)) def.FooterLen = footerLength;
         if (TryPageLength((object)hwp, page, "gutterMm", out var gutterLength)) def.GutterLen = gutterLength;
+        if (page.TryGetPropertyValue("lineNumbers", out var lineNumbers) && lineNumbers is not null)
+            section.ShowLineNumbers = lineNumbers.GetValue<bool>();
+        if (page.TryGetPropertyValue("lineNumberStart", out var lineNumberStart) && lineNumberStart is not null)
+        {
+            var startValue = lineNumberStart.GetValue<int>();
+            if (startValue < 1) throw new ArgumentOutOfRangeException(nameof(startValue), "lineNumberStart는 1 이상이어야 합니다");
+            section.LineNumberStart = startValue;
+        }
         var applyTo = (Json.GetString(op, "applyTo") ?? "current-section").ToLowerInvariant() switch
         {
             "selection" => 1,
@@ -626,7 +640,7 @@ public sealed partial class HwpAdapter
         return new HwpWriteResult(ok && exists, "pdf:export", exists ? $"exported {new FileInfo(output).Length} bytes" : "PDF output missing", null, output);
     }
 
-    private static void ValidateCharacterStyle(JsonObject style)
+    internal static void ValidateCharacterStyle(JsonObject style)
     {
         if (TryJsonNumber(style, "fontSize", out var fontSize) && fontSize is < 1 or > 4096)
             throw new ArgumentOutOfRangeException(nameof(fontSize), "fontSize는 1~4096pt입니다");
@@ -642,10 +656,14 @@ public sealed partial class HwpAdapter
             throw new ArgumentOutOfRangeException(nameof(ratioValue), "widthRatio는 50~200입니다");
         if (style["offset"] is JsonValue offset && offset.TryGetValue<int>(out var offsetValue) && offsetValue is < -100 or > 100)
             throw new ArgumentOutOfRangeException(nameof(offsetValue), "offset은 -100~100입니다");
+        if (Json.GetString(style, "shadowColor") is { Length: > 0 } shadowColorValue) _ = ToHwpColorRef(shadowColorValue);
+        var embossOn = style.TryGetPropertyValue("emboss", out var embossNode) && embossNode is JsonValue embossValue && embossValue.TryGetValue<bool>(out var embossed) && embossed;
+        var engraveOn = style.TryGetPropertyValue("engrave", out var engraveNode) && engraveNode is JsonValue engraveValue && engraveValue.TryGetValue<bool>(out var engraved) && engraved;
+        if (embossOn && engraveOn) throw new ArgumentException("emboss와 engrave는 동시에 true일 수 없습니다");
         if (Json.GetString(style, "align") is { Length: > 0 } align) _ = ParagraphAlignType(align);
     }
 
-    private static void ValidateParagraphStyle(JsonObject style)
+    internal static void ValidateParagraphStyle(JsonObject style)
     {
         if (Json.GetString(style, "align") is { Length: > 0 } align) _ = ParagraphAlignType(align);
         if (TryJsonNumber(style, "lineSpacingPercent", out var spacing) && spacing is < 50 or > 500)
@@ -653,9 +671,14 @@ public sealed partial class HwpAdapter
         foreach (var key in new[] { "spaceBeforePt", "spaceAfterPt" })
             if (TryJsonNumber(style, key, out var value) && value < 0)
                 throw new ArgumentOutOfRangeException(key, "문단 간격은 0 이상이어야 합니다");
+        if (style.TryGetPropertyValue("level", out var level) && level is JsonValue levelValue)
+        {
+            if (!levelValue.TryGetValue<int>(out var levelNumber) || levelNumber is < 0 or > 9)
+                throw new ArgumentOutOfRangeException(nameof(levelNumber), "level은 0~9입니다");
+        }
     }
 
-    private static void ValidatePageSetup(JsonObject op)
+    internal static void ValidatePageSetup(JsonObject op)
     {
         var page = Json.GetObj(op, "page") ?? throw new ArgumentException("set_page_setup.page가 필요합니다");
         foreach (var key in new[] { "widthMm", "heightMm" })
@@ -668,6 +691,11 @@ public sealed partial class HwpAdapter
             throw new ArgumentException("orientation은 portrait|landscape 중 하나여야 합니다");
         if ((Json.GetString(op, "applyTo") ?? "current-section").ToLowerInvariant() is not ("selection" or "current-section" or "document" or "new-section"))
             throw new ArgumentException("applyTo는 selection|current-section|document|new-section 중 하나여야 합니다");
+        if (page.TryGetPropertyValue("lineNumberStart", out var lineNumberStart) && lineNumberStart is JsonValue startValue)
+        {
+            if (!startValue.TryGetValue<int>(out var startNumber) || startNumber < 1)
+                throw new ArgumentOutOfRangeException(nameof(startNumber), "lineNumberStart는 1 이상이어야 합니다");
+        }
     }
 
     private static void ValidateBreak(JsonObject op)

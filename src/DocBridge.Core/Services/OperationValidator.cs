@@ -77,6 +77,9 @@ public sealed class OperationValidator
             ["table_merge_cells"] = new[] { ("startRow", "int"), ("startCol", "int"), ("endRow", "int"), ("endCol", "int") },
             ["table_set_row_height"] = new[] { ("row", "int"), ("heightMm", "number") },
             ["table_set_row_heights"] = new[] { ("rows", "array") },
+            ["table_set_repeat_header"] = Array.Empty<(string Field, string Type)>(),
+            ["insert_footnote"] = new[] { ("text", "string") },
+            ["insert_endnote"] = new[] { ("text", "string") },
             ["set_field_text"] = new[] { ("name", "string"), ("text", "string") },
             ["insert_picture"] = new[] { ("path", "string") },
             ["insert_page_number"] = Array.Empty<(string Field, string Type)>(),
@@ -146,6 +149,9 @@ public sealed class OperationValidator
             ["table_merge_cells"] = new[] { "tableIndex", "file", "documentRef" },
             ["table_set_row_height"] = new[] { "tableIndex", "file", "documentRef" },
             ["table_set_row_heights"] = new[] { "tableIndex", "file", "documentRef" },
+            ["table_set_repeat_header"] = new[] { "tableIndex", "repeat", "file", "documentRef" },
+            ["insert_footnote"] = new[] { "target", "file", "documentRef" },
+            ["insert_endnote"] = new[] { "target", "file", "documentRef" },
             ["set_field_text"] = new[] { "file", "documentRef" },
             ["insert_picture"] = new[]
             {

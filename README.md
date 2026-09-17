@@ -1,4 +1,4 @@
-# DocBridge 0.4.22
+# DocBridge 0.4.23
 
 Windows의 Microsoft Excel, 한컴 한글(HWP/HWPX), AutoCAD 및 GstarCAD를 Kimi·Claude·Codex·Cursor가 공통 MCP 도구로 읽고 수정하게 하는 로컬 브리지입니다.
 

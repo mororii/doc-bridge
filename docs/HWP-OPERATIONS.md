@@ -56,15 +56,15 @@ DOCX 우선 새 문서 예시:
 
 ### `set_paragraph_style_basic`
 
-`style`은 `fontName`, `fontSize`, `bold`, `italic`, `textColor`, `shadeColor`, `underline`, `underlineColor`, `strikeout`, `strikeoutColor`, `letterSpacing`(-50~50), `widthRatio`(50~200), `offset`(-100~100), `superscript`, `subscript`, `align`을 지원한다. 색상은 `#RRGGBB`이다. `target.scope`은 `selection|document`, `target.text`는 정확한 대상 문구이다.
+`style`은 `fontName`, `fontSize`, `bold`, `italic`, `textColor`, `shadeColor`, `underline`, `underlineColor`, `strikeout`, `strikeoutColor`, `letterSpacing`(-50~50), `widthRatio`(50~200), `offset`(-100~100), `superscript`, `subscript`, `align`, `outline`, `shadow`+`shadowColor`, `emboss`/`engrave`(동시 true 불가), `smallCaps`, `kerning`을 지원한다. 색상은 `#RRGGBB`이다. `target.scope`은 `selection|document`, `target.text`는 정확한 대상 문구이다.
 
 ### `set_paragraph_format`
 
-`style`은 `align`, `leftMarginMm`, `rightMarginMm`, `firstLineIndentMm`, `spaceBeforePt`, `spaceAfterPt`, `lineSpacingPercent`(50~500), `widowOrphan`, `keepWithNext`, `keepLinesTogether`, `pageBreakBefore`를 지원한다. `target.scope`은 `selection|paragraph|document`이다.
+`style`은 `align`, `leftMarginMm`, `rightMarginMm`, `firstLineIndentMm`, `spaceBeforePt`, `spaceAfterPt`, `lineSpacingPercent`(50~500), `widowOrphan`, `keepWithNext`, `keepLinesTogether`, `pageBreakBefore`, `level`(0~9, 0=본문)를 지원한다. `target.scope`은 `selection|paragraph|document`이다.
 
 ### `set_page_setup`
 
-`page`에 `widthMm`, `heightMm`, `orientation`(`portrait|landscape`), 네 방향 `*MarginMm`, `headerMm`, `footerMm`, `gutterMm`을 넣는다. `applyTo`는 `selection|current-section|document|new-section`이다.
+`page`에 `widthMm`, `heightMm`, `orientation`(`portrait|landscape`), 네 방향 `*MarginMm`, `headerMm`, `footerMm`, `gutterMm`, `lineNumbers`, `lineNumberStart`(1 이상)을 넣는다. `applyTo`는 `selection|current-section|document|new-section`이다.
 
 ### `insert_break`
 
@@ -83,9 +83,17 @@ DOCX 우선 새 문서 예시:
 
 셀 나누기는 한글 2024 자동화에서 숨은 대화상자를 발생시켜 공개 명령에서 제외했다. 필요한 문서라면 병합 전 표를 다시 구성하는 방식으로 처리한다.
 
+- `table_set_repeat_header`: `tableIndex`, `repeat`(기본 true). 표 첫 행을 각 페이지에 반복한다. HShapeObject.RepeatHeader(ushort) 경로이며 적용 뒤 재선택·재조회로 검증한다.
+
+형광펜/다단/글머리·번호 적용/캡션/텍스트박스/수식 입력 액션은 한글 2024(13.0.0.866) 실측에서 Execute가 false를 반환해 공개 명령에서 제외한다. 수식(`EquationCreate`)은 실행되나 내용 입력 계약이 없어 제외한다.
+
 ### 기존 양식 필드
 
 `hwp_read_text({"scope":"fields","maxFields":100,"includeValues":true})`는 기존 필드를 제한된 개수로 읽는다. `set_field_text`는 템플릿에 이미 존재하는 `name`의 내용을 바꾸고 `GetFieldText`로 정확히 확인한다. 새 필드·북마크·하이퍼링크 삽입은 이 버전의 한글에서 숨은 대화상자를 일으켜 공개 명령에 포함하지 않는다.
+
+### `insert_footnote` / `insert_endnote`
+
+`text`(필수)를 주석 내용으로 입력한다. `target.text`가 있으면 문서 처음부터의 첫 일치 문구를 선택해 그 위치에 달고(occurrence 미지원), 없으면 현재 커서/선택 위치에 단다. 각주는 `fn`, 미주는 `en` 컨트롤 수 +1로 검증하며 삽입 뒤 캐럿은 문서 시작으로 복귀한다. dry-run이 아닌 배치에서는 `confirmToken`이 필요하다.
 
 ### `insert_picture`
 
