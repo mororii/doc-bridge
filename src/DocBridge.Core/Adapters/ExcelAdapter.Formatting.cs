@@ -640,14 +640,46 @@ public sealed partial class ExcelAdapter
             if (canonical.ContainsKey(ExcelStyleContract.FontSize))
                 dynamicFont.Size = canonical[ExcelStyleContract.FontSize]!.GetValue<double>();
             if (canonical.ContainsKey(ExcelStyleContract.NumberFormat))
-                range.NumberFormat = Json.GetString(canonical, ExcelStyleContract.NumberFormat);
+                AssignRangeNumberFormat(range, Json.GetString(canonical, ExcelStyleContract.NumberFormat) ?? "");
             if (canonical.ContainsKey(ExcelStyleContract.FontColor))
                 dynamicFont.Color = canonical[ExcelStyleContract.FontColor]!.GetValue<double>();
+            if (canonical.ContainsKey(ExcelStyleContract.NoFill) &&
+                Json.GetBool(canonical, ExcelStyleContract.NoFill))
+                dynamicInterior.Pattern = ExcelStyleContract.XlPatternNone;
             if (canonical.ContainsKey(ExcelStyleContract.FillColor))
             {
                 dynamicInterior.Color = canonical[ExcelStyleContract.FillColor]!.GetValue<double>();
                 dynamicInterior.Pattern = ExcelStyleContract.XlPatternSolid;
             }
+            if (canonical.ContainsKey(ExcelStyleContract.FillPattern))
+                dynamicInterior.Pattern = ExcelStyleContract.FillPatternValue(
+                    Json.GetString(canonical, ExcelStyleContract.FillPattern)!);
+            if (canonical.ContainsKey(ExcelStyleContract.FontName))
+                dynamicFont.Name = Json.GetString(canonical, ExcelStyleContract.FontName);
+            if (canonical.ContainsKey(ExcelStyleContract.HorizontalAlign))
+                range.HorizontalAlignment = ExcelStyleContract.HorizontalAlignValue(
+                    Json.GetString(canonical, ExcelStyleContract.HorizontalAlign)!);
+            if (canonical.ContainsKey(ExcelStyleContract.VerticalAlign))
+                range.VerticalAlignment = ExcelStyleContract.VerticalAlignValue(
+                    Json.GetString(canonical, ExcelStyleContract.VerticalAlign)!);
+            if (canonical.ContainsKey(ExcelStyleContract.WrapText))
+                range.WrapText = Json.GetBool(canonical, ExcelStyleContract.WrapText);
+            if (canonical.ContainsKey(ExcelStyleContract.ShrinkToFit))
+                range.ShrinkToFit = Json.GetBool(canonical, ExcelStyleContract.ShrinkToFit);
+            if (canonical.ContainsKey(ExcelStyleContract.Underline))
+                dynamicFont.Underline = ExcelStyleContract.UnderlineValue(
+                    Json.GetString(canonical, ExcelStyleContract.Underline)!);
+            if (canonical.ContainsKey(ExcelStyleContract.Strikethrough))
+                dynamicFont.Strikethrough = Json.GetBool(canonical, ExcelStyleContract.Strikethrough);
+            if (canonical.ContainsKey(ExcelStyleContract.Indent))
+                range.IndentLevel = Json.GetInt(canonical, ExcelStyleContract.Indent)!.Value;
+            if (canonical.ContainsKey(ExcelStyleContract.Orientation))
+                range.Orientation = ExcelStyleContract.OrientationValue(canonical[ExcelStyleContract.Orientation]!);
+            if (canonical.ContainsKey(ExcelStyleContract.Locked))
+                range.Locked = Json.GetBool(canonical, ExcelStyleContract.Locked);
+            if (canonical.ContainsKey(ExcelStyleContract.Borders) &&
+                Json.GetObj(canonical, ExcelStyleContract.Borders) is { } borders)
+                ApplyCanonicalBorders(rangeObject, borders);
 
             exec.Affected.Add(new AffectedRef("range", $"{sheet.Name}!{rangeAddr}"));
 
@@ -659,18 +691,25 @@ public sealed partial class ExcelAdapter
                 {
                     var matched = key switch
                     {
-                        ExcelStyleContract.Bold => ScalarBoolEquals((object?)dynamicFont.Bold, node.GetValue<bool>()),
-                        ExcelStyleContract.Italic => ScalarBoolEquals((object?)dynamicFont.Italic, node.GetValue<bool>()),
-                        ExcelStyleContract.FontSize => ScalarDoubleEquals((object?)dynamicFont.Size, node.GetValue<double>()),
-                        ExcelStyleContract.NumberFormat => ScalarStringEquals(
-                            (object?)range.NumberFormat, node.GetValue<string>()),
-                        ExcelStyleContract.FontColor => AppliedColorMatches(
-                            rangeObject, node.GetValue<double>(), fill: false),
-                        ExcelStyleContract.FillColor => AppliedColorMatches(
-                            rangeObject, node.GetValue<double>(), fill: true),
-                        _ => false,
+                        ExcelStyleContract.Borders => AppliedBordersMatch(
+                            rangeObject, Json.GetObj(canonical, ExcelStyleContract.Borders)),
+                        ExcelStyleContract.Bold => ExcelFormatReadback.AppliedBoldMatches(
+                            rangeObject, node.GetValue<bool>()),
+                        _ => ExcelFormatAreas.AllAreas(
+                            rangeObject, area => VerifyNonBorderStyleOnArea(area, key, node)),
                     };
-                    if (!matched) mismatches.Add($"{sheet.Name}!{rangeAddr}: style '{key}' readback mismatch");
+                    if (!matched)
+                    {
+                        if (key == ExcelStyleContract.Borders)
+                        {
+                            var why = ExcelBorderReadback.ExplainAppliedBorders(
+                                rangeObject, Json.GetObj(canonical, ExcelStyleContract.Borders));
+                            mismatches.Add(
+                                $"{sheet.Name}!{rangeAddr}: style 'borders' readback mismatch; {string.Join("; ", why)}");
+                        }
+                        else
+                            mismatches.Add($"{sheet.Name}!{rangeAddr}: style '{key}' readback mismatch");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -683,6 +722,70 @@ public sealed partial class ExcelAdapter
             RotHelper.ReleaseComReference(interior);
             RotHelper.ReleaseComReference(font);
             RotHelper.ReleaseComReference(rangeObject);
+        }
+    }
+
+    private static bool VerifyNonBorderStyleOnArea(object areaObject, string key, JsonNode node)
+    {
+        object? font = null;
+        object? interior = null;
+        try
+        {
+            dynamic range = areaObject;
+            font = (object)range.Font;
+            interior = (object)range.Interior;
+            dynamic dynamicFont = font;
+            dynamic dynamicInterior = interior;
+            return key switch
+            {
+                ExcelStyleContract.Italic => ScalarBoolEquals((object?)dynamicFont.Italic, node.GetValue<bool>()),
+                ExcelStyleContract.FontSize => ScalarDoubleEquals((object?)dynamicFont.Size, node.GetValue<double>()),
+                ExcelStyleContract.NumberFormat => ExcelNumberFormatContract.ReadbackMatches(
+                    node.GetValue<string>(),
+                    Convert.ToString((object?)range.NumberFormat, CultureInfo.InvariantCulture)),
+                ExcelStyleContract.FontColor => AppliedColorMatches(
+                    areaObject, node.GetValue<double>(), fill: false),
+                ExcelStyleContract.FillColor => AppliedColorMatches(
+                    areaObject, node.GetValue<double>(), fill: true),
+                ExcelStyleContract.FontName => ScalarStringEquals(
+                    (object?)dynamicFont.Name, node.GetValue<string>()),
+                ExcelStyleContract.HorizontalAlign => ScalarIntEquals(
+                    (object?)range.HorizontalAlignment,
+                    ExcelStyleContract.HorizontalAlignValue(node.GetValue<string>())),
+                ExcelStyleContract.VerticalAlign => ScalarIntEquals(
+                    (object?)range.VerticalAlignment,
+                    ExcelStyleContract.VerticalAlignValue(node.GetValue<string>())),
+                ExcelStyleContract.WrapText => ScalarBoolEquals(
+                    (object?)range.WrapText, node.GetValue<bool>()),
+                ExcelStyleContract.ShrinkToFit => ScalarBoolEquals(
+                    (object?)range.ShrinkToFit, node.GetValue<bool>()),
+                ExcelStyleContract.Underline => ScalarIntEquals(
+                    (object?)dynamicFont.Underline,
+                    ExcelStyleContract.UnderlineValue(node.GetValue<string>())),
+                ExcelStyleContract.Strikethrough => ScalarBoolEquals(
+                    (object?)dynamicFont.Strikethrough, node.GetValue<bool>()),
+                ExcelStyleContract.Indent => ScalarIntEquals(
+                    (object?)range.IndentLevel, node.GetValue<int>()),
+                ExcelStyleContract.Orientation => ScalarIntEquals(
+                    (object?)range.Orientation, ExcelStyleContract.OrientationValue(node)),
+                ExcelStyleContract.Locked => ScalarBoolEquals(
+                    (object?)range.Locked, node.GetValue<bool>()),
+                ExcelStyleContract.FillPattern => ScalarIntEquals(
+                    (object?)dynamicInterior.Pattern,
+                    ExcelStyleContract.FillPatternValue(node.GetValue<string>())),
+                ExcelStyleContract.NoFill => ScalarIntEquals(
+                    (object?)dynamicInterior.Pattern, ExcelStyleContract.XlPatternNone),
+                _ => false,
+            };
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            RotHelper.ReleaseComReference(interior);
+            RotHelper.ReleaseComReference(font);
         }
     }
 
@@ -756,61 +859,43 @@ public sealed partial class ExcelAdapter
 
     private static bool EveryCellAppliedColorMatches(object rangeObject, double wanted, bool fill)
     {
-        object? cells = null;
-        object? rowsObject = null;
-        object? columnsObject = null;
-        try
+        var allMatch = true;
+        ExcelFormatAreas.ForEachArea(rangeObject, area =>
         {
-            dynamic range = rangeObject;
-            rowsObject = (object)range.Rows;
-            columnsObject = (object)range.Columns;
-            var rows = Convert.ToInt32(((dynamic)rowsObject).Count, CultureInfo.InvariantCulture);
-            var columns = Convert.ToInt32(((dynamic)columnsObject).Count, CultureInfo.InvariantCulture);
-            if (rows < 1 || columns < 1) return false;
-            cells = (object)range.Cells;
-            for (var row = 1; row <= rows; row++)
+            ExcelFormatAreas.ForEachCell(area, cell =>
             {
-                for (var col = 1; col <= columns; col++)
+                object? font = null;
+                object? interior = null;
+                try
                 {
-                    object? cell = null;
-                    object? font = null;
-                    object? interior = null;
-                    try
+                    dynamic dynamicCell = cell;
+                    if (fill)
                     {
-                        cell = (object)((dynamic)cells).Item(row, col);
-                        dynamic dynamicCell = cell;
-                        if (fill)
-                        {
-                            interior = (object)dynamicCell.Interior;
-                            dynamic dynamicInterior = interior;
-                            if (!ScalarDoubleEquals((object?)dynamicInterior.Color, wanted)
-                                || !ScalarIntEquals((object?)dynamicInterior.Pattern, ExcelStyleContract.XlPatternSolid))
-                                return false;
-                        }
-                        else
-                        {
-                            font = (object)dynamicCell.Font;
-                            if (!ScalarDoubleEquals((object?)((dynamic)font).Color, wanted))
-                                return false;
-                        }
+                        interior = (object)dynamicCell.Interior;
+                        dynamic dynamicInterior = interior;
+                        if (!ScalarDoubleEquals((object?)dynamicInterior.Color, wanted)
+                            || !ScalarIntEquals((object?)dynamicInterior.Pattern, ExcelStyleContract.XlPatternSolid))
+                            allMatch = false;
                     }
-                    finally
+                    else
                     {
-                        RotHelper.ReleaseComReference(interior);
-                        RotHelper.ReleaseComReference(font);
-                        RotHelper.ReleaseComReference(cell);
+                        font = (object)dynamicCell.Font;
+                        if (!ScalarDoubleEquals((object?)((dynamic)font).Color, wanted))
+                            allMatch = false;
                     }
                 }
-            }
-
-            return true;
-        }
-        finally
-        {
-            RotHelper.ReleaseComReference(cells);
-            RotHelper.ReleaseComReference(columnsObject);
-            RotHelper.ReleaseComReference(rowsObject);
-        }
+                catch
+                {
+                    allMatch = false;
+                }
+                finally
+                {
+                    RotHelper.ReleaseComReference(interior);
+                    RotHelper.ReleaseComReference(font);
+                }
+            });
+        });
+        return allMatch;
     }
 
     private static JsonObject CaptureRangeStyleSummary(object range)
@@ -834,6 +919,19 @@ public sealed partial class ExcelAdapter
                 ["fillColor"] = ComDoubleNode(SafeGet(() => (object?)dynamicInterior.Color)),
                 ["fillColorIndex"] = ComIntNode(SafeGet(() => (object?)dynamicInterior.ColorIndex)),
                 ["fillPattern"] = ComIntNode(SafeGet(() => (object?)dynamicInterior.Pattern)),
+                ["fontName"] = ComStringNode(SafeGet(() => (object?)dynamicFont.Name)),
+                ["horizontalAlign"] = ComAlignName(SafeGet(() => (object?)dynamicRange.HorizontalAlignment), vertical: false),
+                ["verticalAlign"] = ComAlignName(SafeGet(() => (object?)dynamicRange.VerticalAlignment), vertical: true),
+                ["wrapText"] = ComBoolNode(SafeGet(() => (object?)dynamicRange.WrapText)),
+                ["shrinkToFit"] = ComBoolNode(SafeGet(() => (object?)dynamicRange.ShrinkToFit)),
+                ["underline"] = ComUnderlineName(SafeGet(() => (object?)dynamicFont.Underline)),
+                ["strikethrough"] = ComBoolNode(SafeGet(() => (object?)dynamicFont.Strikethrough)),
+                ["indent"] = ComIntNode(SafeGet(() => (object?)dynamicRange.IndentLevel)),
+                ["orientation"] = ComIntNode(SafeGet(() => (object?)dynamicRange.Orientation)),
+                ["locked"] = ComBoolNode(SafeGet(() => (object?)dynamicRange.Locked)),
+                ["noFill"] = ComBoolNode(SafeGet(() =>
+                    (object?)(Convert.ToInt32(dynamicInterior.Pattern, CultureInfo.InvariantCulture) == ExcelStyleContract.XlPatternNone))),
+                ["borders"] = CapturePublicBorderSummary(range),
                 ["mixed"] = IsMixed(SafeGet(() => (object?)dynamicFont.Bold))
                     || IsMixed(SafeGet(() => (object?)dynamicInterior.Pattern)),
             };
@@ -905,7 +1003,7 @@ public sealed partial class ExcelAdapter
             dynamicFont.Bold = RequiredBool(style, "bold");
             dynamicFont.Italic = RequiredBool(style, "italic");
             dynamicFont.Size = RequiredNumber(style, "fontSize");
-            dynamicCell.NumberFormat = RequiredText(style, "numberFormat");
+            AssignRangeNumberFormat(dynamicCell, RequiredText(style, "numberFormat"));
             RestoreLinkedColor(
                 dynamicFont,
                 RequiredNumber(style, "fontColor"),
@@ -1162,6 +1260,198 @@ public sealed partial class ExcelAdapter
         ["error"] = "not executed because a previous operation failed",
     };
 
+    private static void ApplyCanonicalBorders(object rangeObject, JsonObject borders) =>
+        ExcelBorderApply.ApplyCanonical(rangeObject, borders, ApplyApplicableBorder);
+
+    /// <summary>
+    /// Cross-batch counterpart of the EXCEL_BORDER_ORDER validation: a clear
+    /// cannot know earlier batches, so the preview warns when a cleared edge
+    /// is currently drawn on the neighboring strip (shared edge object).
+    /// </summary>
+    private static void WarnBorderClearNeighbors(object sheet, string sheetName, string address,
+        JsonObject? borders, ApplyPreview preview)
+    {
+        var cleared = new List<string>();
+        if (borders is not null)
+        {
+            foreach (var (key, node) in borders)
+            {
+                if (node is not JsonValue value || !value.TryGetValue<string>(out var text) ||
+                    !string.Equals(text, "none", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (key is "all" or "outline")
+                    cleared.AddRange(new[] { "left", "right", "top", "bottom" });
+                else if (key is "left" or "right" or "top" or "bottom")
+                    cleared.Add(key.ToLowerInvariant());
+            }
+        }
+        if (cleared.Count == 0) return;
+        if (!ExcelDataOperationsContract.TryParseA1(address, out var box, allowUnion: false)) return;
+        var neighbors = new List<(string Edge, string Address, int Opposite)>();
+        if (box.Column > 1)
+            neighbors.Add(("left", $"{ColName(box.Column - 1)}{box.Row}:{ColName(box.Column - 1)}{box.Row + box.Rows - 1}", 10));
+        if (box.Column + box.Columns - 1 < 16_384)
+            neighbors.Add(("right", $"{ColName(box.Column + box.Columns)}{box.Row}:{ColName(box.Column + box.Columns)}{box.Row + box.Rows - 1}", 7));
+        if (box.Row > 1)
+            neighbors.Add(("top", $"{ColName(box.Column)}{box.Row - 1}:{ColName(box.Column + box.Columns - 1)}{box.Row - 1}", 9));
+        if (box.Row + box.Rows - 1 < 1_048_576)
+            neighbors.Add(("bottom", $"{ColName(box.Column)}{box.Row + box.Rows}:{ColName(box.Column + box.Columns - 1)}{box.Row + box.Rows}", 8));
+        foreach (var (edge, neighborAddress, opposite) in neighbors)
+        {
+            if (!cleared.Contains(edge)) continue;
+            var state = ReadNeighborEdge(sheet, neighborAddress, opposite);
+            if (state is null) continue;
+            preview.Warnings.Add(
+                $"[EXCEL_BORDER_SHARED_EDGE] clearing {sheetName}!{address} also removes the {edge} edge " +
+                $"shared with {sheetName}!{neighborAddress} (currently {state}); redraw that outline afterwards");
+        }
+    }
+
+    private static string? ReadNeighborEdge(object sheet, string address, int edgeIndex)
+    {
+        object? range = null;
+        object? borders = null;
+        object? border = null;
+        try
+        {
+            range = (object)((dynamic)sheet).Range(address);
+            borders = (object)((dynamic)range).Borders;
+            border = (object)((dynamic)borders).Item(edgeIndex);
+            object? line = null;
+            try { line = ((dynamic)border).LineStyle; }
+            catch { return null; }
+            if (line is null) return null;
+            var style = Convert.ToInt32(line, CultureInfo.InvariantCulture);
+            if (style == ExcelBorderContract.XlLineStyleNone) return null;
+            return ExcelBorderContract.LineStyleName(style);
+        }
+        catch { return null; }
+        finally
+        {
+            RotHelper.ReleaseComReference(border);
+            RotHelper.ReleaseComReference(borders);
+            RotHelper.ReleaseComReference(range);
+        }
+    }
+
+    private static void ApplyApplicableBorder(object target, ExcelBorderContract.EdgeSpec spec)
+    {
+        if (ExcelFormatAreas.TryGetDimensions(target, out var rows, out var columns) &&
+            !ExcelBorderApplicability.InsideEdgeApplies(spec.Name, rows, columns))
+            return;
+        ApplyOneBorder(target, spec);
+    }
+
+    private static void ApplyOneBorder(object target, ExcelBorderContract.EdgeSpec spec)
+    {
+        var index = ExcelBorderContract.EdgeIndex(spec.Name);
+        if (index == 0) return;
+        object? borders = null;
+        object? border = null;
+        try
+        {
+            borders = (object)((dynamic)target).Borders;
+            border = (object)((dynamic)borders).Item(index);
+            if (string.Equals(spec.LineStyle, ExcelBorderContract.LineNone, StringComparison.OrdinalIgnoreCase))
+            {
+                ((dynamic)border).LineStyle = ExcelBorderContract.XlLineStyleNone;
+                return;
+            }
+
+            ((dynamic)border).LineStyle = ExcelBorderContract.LineStyleValues[spec.LineStyle];
+            ((dynamic)border).Weight = ExcelBorderContract.WeightValues[spec.Weight];
+            ((dynamic)border).Color = spec.Color;
+        }
+        finally
+        {
+            RotHelper.ReleaseComReference(border);
+            RotHelper.ReleaseComReference(borders);
+        }
+    }
+
+    private static bool AppliedBordersMatch(object rangeObject, JsonObject? borders)
+    {
+        if (borders is null) return false;
+        return ExcelFormatAreas.AllAreas(rangeObject, area =>
+        {
+            if (!ExcelFormatAreas.TryGetDimensions(area, out var rows, out var columns))
+                return ExcelBorderReadback.AppliedBordersMatch(area, borders);
+            return ExcelBorderReadback.AppliedBordersMatch(
+                area, ExcelBorderApplicability.ForRange(borders, rows, columns));
+        });
+    }
+
+    private static bool AppliedCellBorderMatches(object rangeObject, ExcelBorderContract.EdgeSpec spec) =>
+        ExcelBorderReadback.AppliedCellBorderMatches(rangeObject, spec);
+
+    private static bool OneBorderMatches(object target, ExcelBorderContract.EdgeSpec spec) =>
+        ExcelBorderReadback.OneBorderMatches(target, spec);
+
+    private static JsonNode? ComUnderlineName(object? raw)
+    {
+        if (IsMixed(raw)) return null;
+        try
+        {
+            return JsonValue.Create(ExcelStyleContract.UnderlineName(Convert.ToInt32(raw, CultureInfo.InvariantCulture)));
+        }
+        catch { return null; }
+    }
+
+    private static JsonNode? ComAlignName(object? raw, bool vertical)
+    {
+        if (IsMixed(raw)) return null;
+        try
+        {
+            var value = Convert.ToInt32(raw, CultureInfo.InvariantCulture);
+            return vertical
+                ? JsonValue.Create(ExcelStyleContract.VerticalAlignName(value))
+                : JsonValue.Create(ExcelStyleContract.HorizontalAlignName(value));
+        }
+        catch { return null; }
+    }
+
+    private static JsonObject CapturePublicBorderSummary(object range)
+    {
+        var edges = new JsonObject();
+        foreach (var (name, index) in new[]
+                 {
+                     ("left", ExcelBorderContract.XlEdgeLeft),
+                     ("right", ExcelBorderContract.XlEdgeRight),
+                     ("top", ExcelBorderContract.XlEdgeTop),
+                     ("bottom", ExcelBorderContract.XlEdgeBottom),
+                     ("insideVertical", ExcelBorderContract.XlInsideVertical),
+                     ("insideHorizontal", ExcelBorderContract.XlInsideHorizontal),
+                 })
+        {
+            object? borders = null;
+            object? border = null;
+            try
+            {
+                borders = (object)((dynamic)range).Borders;
+                border = (object)((dynamic)borders).Item(index);
+                var line = Convert.ToInt32(((dynamic)border).LineStyle, CultureInfo.InvariantCulture);
+                edges[name] = new JsonObject
+                {
+                    ["lineStyle"] = ExcelBorderContract.LineStyleName(line),
+                    ["weight"] = ExcelBorderContract.WeightName(
+                        Convert.ToInt32(((dynamic)border).Weight, CultureInfo.InvariantCulture)),
+                    ["color"] = Convert.ToDouble(((dynamic)border).Color, CultureInfo.InvariantCulture),
+                };
+            }
+            catch
+            {
+                edges[name] = null;
+            }
+            finally
+            {
+                RotHelper.ReleaseComReference(border);
+                RotHelper.ReleaseComReference(borders);
+            }
+        }
+
+        return edges;
+    }
+
     private static object? SafeGet(Func<object?> read)
     {
         try { return read(); }
@@ -1282,4 +1572,36 @@ public sealed partial class ExcelAdapter
     }
 
     private static bool NumbersEqual(double left, double right) => Math.Abs(left - right) < 1e-9;
+
+    private static void AssignRangeNumberFormat(object range, string format)
+    {
+        ExcelNumberFormatContract.Assign(new ComNumberFormatSurface(range), format);
+    }
+
+    private sealed class ComNumberFormatSurface : ExcelNumberFormatContract.INumberFormatSurface
+    {
+        private readonly object _range;
+
+        public ComNumberFormatSurface(object range) => _range = range;
+
+        public void SetNumberFormat(string format) => ((dynamic)_range).NumberFormat = format;
+
+        public void SetNumberFormatLocal(string format) => ((dynamic)_range).NumberFormatLocal = format;
+
+        public string? LocalGeneralName
+        {
+            get
+            {
+                object? application = null;
+                try
+                {
+                    application = (object)((dynamic)_range).Application;
+                    return Convert.ToString(
+                        ((dynamic)application).International[ExcelNumberFormatContract.XlGeneralFormatName],
+                        CultureInfo.InvariantCulture);
+                }
+                finally { RotHelper.ReleaseComReference(application); }
+            }
+        }
+    }
 }

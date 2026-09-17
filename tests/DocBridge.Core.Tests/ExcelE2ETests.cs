@@ -343,6 +343,105 @@ public class ExcelE2ETests : IDisposable
             ["sheet"] = "매출", ["range"] = "C7", ["includeStyles"] = true,
         }), "styles")!["interiorColor"]!.GetValue<double>());
 
+        var multiMergeOps = new JsonArray(
+            new JsonObject
+            {
+                ["op"] = "merge_cells", ["target"] = new JsonObject { ["sheet"] = "매출" }, ["range"] = "A12:B12",
+            },
+            new JsonObject
+            {
+                ["op"] = "merge_cells", ["target"] = new JsonObject { ["sheet"] = "매출" }, ["range"] = "C12:D12",
+            });
+        var multiMergeDry = host.ApplyOps("excel", new JsonObject { ["ops"] = multiMergeOps.DeepClone(), ["dryRun"] = true });
+        Assert.True(Json.GetBool(multiMergeDry, "ok"), $"multi-merge dry-run failed: {multiMergeDry}");
+        var multiMergeApplied = host.ApplyOps("excel", new JsonObject
+        {
+            ["ops"] = multiMergeOps.DeepClone(), ["dryRun"] = false,
+            ["confirmToken"] = Json.GetString(multiMergeDry, "confirmToken"),
+        });
+        Assert.True(Json.GetBool(multiMergeApplied, "ok"), $"multi-merge apply failed: {multiMergeApplied}");
+        var multiLayout = Json.GetObj(host.Read("excel", new JsonObject
+        {
+            ["sheet"] = "매출", ["range"] = "A12:D12", ["includeLayout"] = true,
+        }), "layout")!;
+        Assert.Contains(Json.GetArr(multiLayout, "mergedAreas")!, node => node!.GetValue<string>() == "A12:B12");
+        Assert.Contains(Json.GetArr(multiLayout, "mergedAreas")!, node => node!.GetValue<string>() == "C12:D12");
+        var multiRestoreDry = host.CoreRestoreSnapshot(new JsonObject { ["snapshotId"] = Json.GetString(multiMergeDry, "snapshotId") });
+        var multiRestored = host.CoreRestoreSnapshot(new JsonObject
+        {
+            ["snapshotId"] = Json.GetString(multiMergeDry, "snapshotId"),
+            ["confirmToken"] = Json.GetString(multiRestoreDry, "confirmToken"),
+        });
+        Assert.True(Json.GetBool(multiRestored, "ok"), $"multi-merge restore failed: {multiRestored}");
+        Assert.Equal("merge-state", Json.GetString(multiRestored, "restoreMode"));
+
+        var phase1FormatOps = new JsonArray(new JsonObject
+        {
+            ["op"] = "format_range",
+            ["target"] = new JsonObject { ["sheet"] = "매출" },
+            ["range"] = "A12",
+            ["style"] = new JsonObject
+            {
+                ["fontName"] = "Calibri",
+                ["horizontalAlign"] = "center",
+                ["verticalAlign"] = "center",
+                ["wrapText"] = true,
+                ["borders"] = new JsonObject
+                {
+                    ["bottom"] = new JsonObject { ["weight"] = "medium", ["lineStyle"] = "continuous" },
+                },
+            },
+        });
+        var phase1FormatDry = host.ApplyOps("excel", new JsonObject { ["ops"] = phase1FormatOps.DeepClone(), ["dryRun"] = true });
+        Assert.True(Json.GetBool(phase1FormatDry, "ok"), $"phase1 format dry-run failed: {phase1FormatDry}");
+        var phase1FormatApplied = host.ApplyOps("excel", new JsonObject
+        {
+            ["ops"] = phase1FormatOps.DeepClone(), ["dryRun"] = false,
+            ["confirmToken"] = Json.GetString(phase1FormatDry, "confirmToken"),
+        });
+        Assert.True(Json.GetBool(phase1FormatApplied, "ok"), $"phase1 format apply failed: {phase1FormatApplied}");
+        Assert.True(Json.GetBool(Json.GetObj(phase1FormatApplied, "readback"), "verified"));
+
+        var layoutOps = new JsonArray(
+            new JsonObject
+            {
+                ["op"] = "freeze_panes", ["target"] = new JsonObject { ["sheet"] = "매출" }, ["cell"] = "G6",
+            },
+            new JsonObject
+            {
+                ["op"] = "set_page_setup",
+                ["target"] = new JsonObject { ["sheet"] = "매출" },
+                ["page"] = new JsonObject
+                {
+                    ["paperSize"] = "A3",
+                    ["orientation"] = "landscape",
+                    ["scale"] = 55,
+                    ["printArea"] = "A1:E11",
+                },
+            });
+        var layoutDry = host.ApplyOps("excel", new JsonObject { ["ops"] = layoutOps.DeepClone(), ["dryRun"] = true });
+        Assert.True(Json.GetBool(layoutDry, "ok"), $"layout dry-run failed: {layoutDry}");
+        var layoutApplied = host.ApplyOps("excel", new JsonObject
+        {
+            ["ops"] = layoutOps.DeepClone(), ["dryRun"] = false,
+            ["confirmToken"] = Json.GetString(layoutDry, "confirmToken"),
+        });
+        Assert.True(Json.GetBool(layoutApplied, "ok"), $"layout apply failed: {layoutApplied}");
+        var layoutRead = Json.GetObj(host.Read("excel", new JsonObject
+        {
+            ["sheet"] = "매출", ["range"] = "A1:G6", ["includeLayout"] = true,
+        }), "layout")!;
+        Assert.Equal("G6", Json.GetString(Json.GetObj(layoutRead, "freezePanes"), "topLeftCell"));
+        Assert.Equal(8, Json.GetInt(Json.GetObj(layoutRead, "pageSetup"), "paperSize"));
+        var layoutRestoreDry = host.CoreRestoreSnapshot(new JsonObject { ["snapshotId"] = Json.GetString(layoutDry, "snapshotId") });
+        var layoutRestored = host.CoreRestoreSnapshot(new JsonObject
+        {
+            ["snapshotId"] = Json.GetString(layoutDry, "snapshotId"),
+            ["confirmToken"] = Json.GetString(layoutRestoreDry, "confirmToken"),
+        });
+        Assert.True(Json.GetBool(layoutRestored, "ok"), $"layout restore failed: {layoutRestored}");
+        Assert.Equal("sheet-layout-state", Json.GetString(layoutRestored, "restoreMode"));
+
         // 2b) An explicit source and destination referring to the same workbook used to
         // separate the shared Workbook RCW during preview/apply. Exercise both phases and
         // then issue another preview through the same adapter to prove the lease remains live.

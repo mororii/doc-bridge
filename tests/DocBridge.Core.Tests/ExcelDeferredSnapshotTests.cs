@@ -254,6 +254,26 @@ public class ExcelDeferredSnapshotTests
             "style");
     }
 
+    [Theory]
+    [InlineData("fontName", "돋움")]
+    [InlineData("wrapText", true)]
+    [InlineData("horizontalAlign", "center")]
+    public void New_format_keys_are_not_deferred_eligible(string key, object value)
+    {
+        var op = FillOp("A1:J100");
+        var style = new JsonObject { ["fillColor"] = 16711680 };
+        style[key] = value switch
+        {
+            bool flag => JsonValue.Create(flag),
+            string text => JsonValue.Create(text),
+            _ => JsonValue.Create(value.ToString()),
+        };
+        op["style"] = style;
+        AssertRefused(
+            ExcelAdapter.EvaluateDeferredFormatRequestEligibility(Enabled, ExecuteMetadata(), new[] { op }),
+            "style");
+    }
+
     [Fact]
     public void Supported_extra_style_keys_are_still_accepted_alongside_fillColor()
     {

@@ -68,6 +68,29 @@ public static class RotHelper
         catch { return false; }
     }
 
+    /// <summary>
+    /// Foreground window handle for active-window instance selection. Returns 0
+    /// when unavailable. Minimized windows can report hwnd 0 through COM, so a
+    /// zero here means "no selectable foreground window", not "no Excel".
+    /// </summary>
+    public static long ForegroundWindowHandle()
+    {
+        try
+        {
+            var handle = GetForegroundWindow();
+            return handle == IntPtr.Zero ? 0 : handle.ToInt64();
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>True when the window handle is both live and visible (not minimized-hidden).</summary>
+    public static bool IsWindowVisibleHandle(long hWnd)
+    {
+        if (hWnd == 0) return false;
+        try { return IsWindowVisible(new IntPtr(hWnd)); }
+        catch { return false; }
+    }
+
     /// <summary>실행 중인 인스턴스 연결. 없으면 null.</summary>
     public static object? GetActiveObject(string progId)
     {
@@ -109,12 +132,18 @@ public static class RotHelper
                     // Balance one acquisition without invalidating the RCW retained in result.
                     ReleaseComReference(app);
                 }
-                else ReleaseComObject(app);
+                else
+                {
+                    // Duplicate HWND with a different RCW can be the adapter's live
+                    // Application alias (GetActiveObject). Never FinalRelease it.
+                    ReleaseComReference(app);
+                }
             }
             catch
             {
-                // Hwnd를 읽지 못한 RCW는 안전하게 제외한다.
-                ReleaseComObject(app);
+                // Hwnd를 읽지 못한 RCW는 안전하게 제외한다. FinalRelease would
+                // invalidate a borrowed attached Application alias.
+                ReleaseComReference(app);
             }
         }
 
@@ -339,6 +368,18 @@ public static class RotHelper
         catch { }
     }
 
+    /// <summary>
+    /// Release an Application RCW acquired during Excel discovery. If it is the
+    /// same RCW as a live attached alias, leave that alias valid.
+    /// </summary>
+    public static void ReleaseDiscoveredApplication(object? discovered, object? liveAlias)
+    {
+        if (discovered is null) return;
+        if (ExcelComAliasContract.MustPreserveLiveAlias(discovered, liveAlias))
+            return;
+        ReleaseComObject(discovered);
+    }
+
     private static IntPtr RootWindow(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero) return IntPtr.Zero;
@@ -379,6 +420,6 @@ public static class RotHelper
             return (string?)((dynamic)app).Version?.ToString();
         }
         catch { return null; }
-        finally { ReleaseComObject(app); }
+        finally { ReleaseComReference(app); }
     }
 }

@@ -78,12 +78,24 @@ public sealed partial class ExcelAdapter
 
     private static JsonObject InspectWorkbook(dynamic app, dynamic workbook, JsonObject args, string scope)
     {
-        return scope switch
+        var normalized = ExcelAuthoringSchema.NormalizeInspectArgs(args);
+        var objectKind = Json.GetString(normalized, "objectKind");
+        var resolved = Json.GetString(normalized, "scope") ?? scope;
+        if (ExcelAuthoringSchema.IsDataObjectInspect(resolved, objectKind) ||
+            ExcelAuthoringSchema.IsDataObjectInspect(scope, objectKind))
         {
-            "scan" => ScanWorkbook(workbook, args),
-            "objects" => InspectObjects(workbook, args),
-            "errors" => InspectFormulaErrors(workbook, args),
-            _ => throw new ArgumentException($"unknown Excel inspect scope '{scope}' (scan|objects|errors|diagnostics)"),
+            var data = ReadDataObjects((object)workbook, normalized);
+            data["scope"] = "objects";
+            return data;
+        }
+
+        return resolved switch
+        {
+            "scan" => ScanWorkbook(workbook, normalized),
+            "objects" => InspectObjects(workbook, normalized),
+            "errors" => InspectFormulaErrors(workbook, normalized),
+            "formula_trace" => InspectFormulaTrace(workbook, normalized),
+            _ => throw new ArgumentException($"unknown Excel inspect scope '{scope}' (scan|objects|errors|formula_trace|diagnostics|<readScope>)"),
         };
     }
 
@@ -129,87 +141,8 @@ public sealed partial class ExcelAdapter
 
     private static JsonObject InspectObjects(dynamic workbook, JsonObject args)
     {
-        var requestedSheet = Json.GetString(args, "sheet");
-        var limit = Math.Clamp(Json.GetInt(args, "limit") ?? 500, 1, 2000);
-        var objects = new JsonArray();
-        var truncated = false;
-        void Add(JsonObject item)
-        {
-            if (objects.Count >= limit) { truncated = true; return; }
-            objects.Add(item);
-        }
-
-        var sheetCount = Convert.ToInt32(workbook.Worksheets.Count, CultureInfo.InvariantCulture);
-        for (var sheetIndex = 1; sheetIndex <= sheetCount; sheetIndex++)
-        {
-            dynamic sheet = workbook.Worksheets.Item(sheetIndex);
-            var sheetName = Convert.ToString(sheet.Name, CultureInfo.InvariantCulture) ?? "";
-            if (!string.IsNullOrWhiteSpace(requestedSheet) &&
-                !string.Equals(sheetName, requestedSheet, StringComparison.OrdinalIgnoreCase)) continue;
-
-            try
-            {
-                var count = Convert.ToInt32(sheet.ListObjects.Count, CultureInfo.InvariantCulture);
-                for (var index = 1; index <= count; index++)
-                {
-                    dynamic item = sheet.ListObjects.Item(index);
-                    Add(new JsonObject { ["type"] = "table", ["sheet"] = sheetName, ["name"] = TryString(() => item.Name), ["range"] = TryString(() => item.Range.Address(false, false)) });
-                }
-            }
-            catch { }
-            try
-            {
-                dynamic charts = sheet.ChartObjects();
-                var count = Convert.ToInt32(charts.Count, CultureInfo.InvariantCulture);
-                for (var index = 1; index <= count; index++)
-                {
-                    dynamic item = charts.Item(index);
-                    Add(new JsonObject { ["type"] = "chart", ["sheet"] = sheetName, ["name"] = TryString(() => item.Name), ["chartType"] = TryInt(() => item.Chart.ChartType) });
-                }
-            }
-            catch { }
-            try
-            {
-                var count = Convert.ToInt32(sheet.PivotTables().Count, CultureInfo.InvariantCulture);
-                for (var index = 1; index <= count; index++)
-                {
-                    dynamic item = sheet.PivotTables().Item(index);
-                    Add(new JsonObject { ["type"] = "pivotTable", ["sheet"] = sheetName, ["name"] = TryString(() => item.Name), ["range"] = TryString(() => item.TableRange2.Address(false, false)) });
-                }
-            }
-            catch { }
-            try
-            {
-                var count = Convert.ToInt32(sheet.Shapes.Count, CultureInfo.InvariantCulture);
-                for (var index = 1; index <= count; index++)
-                {
-                    dynamic item = sheet.Shapes.Item(index);
-                    Add(new JsonObject { ["type"] = "shape", ["sheet"] = sheetName, ["name"] = TryString(() => item.Name), ["shapeType"] = TryInt(() => item.Type) });
-                }
-            }
-            catch { }
-        }
-
-        try
-        {
-            var count = Convert.ToInt32(workbook.Names.Count, CultureInfo.InvariantCulture);
-            for (var index = 1; index <= count; index++)
-            {
-                dynamic item = workbook.Names.Item(index);
-                Add(new JsonObject { ["type"] = "definedName", ["name"] = TryString(() => item.Name), ["refersTo"] = TryString(() => item.RefersTo) });
-            }
-        }
-        catch { }
-
-        return new JsonObject
-        {
-            ["ok"] = true,
-            ["app"] = "excel",
-            ["scope"] = "objects",
-            ["workbook"] = TryString(() => workbook.FullName),
-            ["objects"] = objects,
-            ["coverage"] = new JsonObject { ["limit"] = limit, ["returned"] = objects.Count, ["truncated"] = truncated, ["complete"] = !truncated },
-        };
+        var normalized = ExcelAuthoringSchema.NormalizeInspectArgs(args);
+        return ReadDataObjects((object)workbook, normalized);
     }
 
     private static JsonObject InspectFormulaErrors(dynamic workbook, JsonObject args)

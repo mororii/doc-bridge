@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using DocBridge.Core.Adapters;
 using DocBridge.Core.Models;
@@ -17,8 +19,8 @@ namespace DocBridge.Core.Services;
 /// </summary>
 public sealed partial class DocBridgeHost : IDisposable
 {
-    public const string Version = "0.4.21";
-    private const string AutomationMutex = @"Global\DocBridge.Automation";
+    public const string Version = "0.4.22";
+    public const string AutomationMutexPrefix = @"Global\DocBridge.Automation";
 
     private readonly DocBridgeOptions _options;
     private readonly PolicyEngine _policy;
@@ -50,7 +52,7 @@ public sealed partial class DocBridgeHost : IDisposable
     /// <summary>크로스 프로세스 자동화 직렬화</summary>
     private T WithAutomationLock<T>(Func<T> work, Action<long>? lockTiming = null)
     {
-        using var mutex = new Mutex(false, AutomationMutex);
+        using var mutex = new Mutex(false, AutomationMutexName(_options.RootDir));
         var acquired = false;
         var wait = Stopwatch.StartNew();
         try
@@ -74,6 +76,16 @@ public sealed partial class DocBridgeHost : IDisposable
     /// WaitOne throws AbandonedMutexException when a previous owner crashed. The
     /// current thread then owns the mutex and must ReleaseMutex.
     /// </summary>
+    internal static string AutomationMutexName(string rootDir)
+    {
+        if (Environment.GetEnvironmentVariable("DOCBRIDGE_AUTOMATION_LOCK") is { Length: > 0 } custom)
+            return custom;
+        var normalized = Path.GetFullPath(rootDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .ToUpperInvariant();
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))[..16];
+        return $"{AutomationMutexPrefix}.{hash}";
+    }
+
     internal static bool TryAcquireMutex(Mutex mutex, TimeSpan timeout, out bool abandoned)
     {
         abandoned = false;
@@ -347,6 +359,33 @@ public sealed partial class DocBridgeHost : IDisposable
         {
             _audit.Write(tool, "hwp", "plan", null, false, new[] { ex.Message });
             return Json.ErrorResult($"hwp creation planning failed: {ex.Message}", "hwp");
+        }
+    }
+
+    public JsonObject ExcelLaunch(JsonObject? args = null)
+    {
+        const string tool = "excel_launch";
+        try
+        {
+            return WithAutomationLock(() =>
+            {
+                var routed = _router.Get("excel");
+                var result = routed switch
+                {
+                    ExcelAdapter adapter => adapter.LaunchExcelInstance(args),
+                    ExcelWorkerAdapter worker => worker.Launch(args),
+                    _ => Json.ErrorResult("excel adapter does not support launching", "excel"),
+                };
+                _audit.Write(tool, "excel", "launch", result.DeepClone() as JsonObject,
+                    Json.GetBool(result, "ok"),
+                    Json.GetArr(result, "errors")?.Select(node => node?.GetValue<string>() ?? "") ?? Array.Empty<string>());
+                return result;
+            });
+        }
+        catch (Exception ex)
+        {
+            _audit.Write(tool, "excel", "launch", null, false, new[] { ex.Message });
+            return Json.ErrorResult($"excel_launch failed: {ex.Message}", "excel");
         }
     }
 

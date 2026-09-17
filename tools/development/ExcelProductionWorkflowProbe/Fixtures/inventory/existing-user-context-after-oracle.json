@@ -1,0 +1,48 @@
+{
+  "ok": true,
+  "app": "excel",
+  "documentRef": "통합 문서1",
+  "summary": {
+    "workbook": "통합 문서1",
+    "sheets": [
+      "Sheet1"
+    ],
+    "sheetStates": [
+      {
+        "name": "Sheet1",
+        "visibility": "visible"
+      }
+    ],
+    "activeSheet": "Sheet1",
+    "usedRange": "Sheet1!A1:BQ96",
+    "saved": false,
+    "openWorkbooks": [
+      {
+        "excelHwnd": 8654646,
+        "name": "통합 문서1",
+        "fullName": "통합 문서1",
+        "activeInInstance": true,
+        "sheets": [
+          "Sheet1"
+        ],
+        "saved": false
+      }
+    ]
+  },
+  "selection": {
+    "ref": "Sheet1!N21",
+    "values": [
+      [
+        null
+      ]
+    ],
+    "formulas": [
+      [
+        ""
+      ]
+    ]
+  },
+  "interaction": null,
+  "warnings": [],
+  "errors": []
+}

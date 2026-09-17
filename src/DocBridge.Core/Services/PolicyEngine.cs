@@ -25,8 +25,12 @@ public sealed class PolicyEngine
     private static JsonObject Load(string? path)
     {
         if (path is not null && File.Exists(path))
-            return JsonNode.Parse(File.ReadAllText(path)) as JsonObject
+        {
+            var loaded = JsonNode.Parse(File.ReadAllText(path)) as JsonObject
                    ?? throw new InvalidOperationException($"invalid policy json: {path}");
+            MergeDynamicExcelOps(loaded);
+            return loaded;
+        }
 
         // repo 루트 탐색 (ops/policies/default.policy.json)
         var dir = AppContext.BaseDirectory;
@@ -34,17 +38,71 @@ public sealed class PolicyEngine
         {
             var candidate = Path.Combine(dir, "ops", "policies", "default.policy.json");
             if (File.Exists(candidate))
-                return JsonNode.Parse(File.ReadAllText(candidate)) as JsonObject
+            {
+                var loaded = JsonNode.Parse(File.ReadAllText(candidate)) as JsonObject
                        ?? throw new InvalidOperationException($"invalid policy json: {candidate}");
+                MergeDynamicExcelOps(loaded);
+                return loaded;
+            }
             dir = Directory.GetParent(dir)?.FullName;
         }
 
         var asm = typeof(PolicyEngine).Assembly;
         using var stream = asm.GetManifestResourceStream("DocBridge.ops.policies.default.policy.json")
             ?? throw new InvalidOperationException("embedded default.policy.json not found");
-        return JsonNode.Parse(stream) as JsonObject
+        var embedded = JsonNode.Parse(stream) as JsonObject
                ?? throw new InvalidOperationException("embedded default.policy.json invalid");
+        MergeDynamicExcelOps(embedded);
+        return embedded;
     }
+
+    private static void MergeDynamicExcelOps(JsonObject policy)
+    {
+        if (Json.GetObj(policy, "apps")?["excel"] is not JsonObject excel)
+            return;
+        excel["writeOps"] ??= new JsonArray();
+        excel["highRiskOps"] ??= new JsonArray();
+        excel["forbiddenOps"] ??= new JsonArray();
+        var write = (JsonArray)excel["writeOps"]!;
+        var high = (JsonArray)excel["highRiskOps"]!;
+        var forbidden = (JsonArray)excel["forbiddenOps"]!;
+
+        void Ensure(JsonArray target, string name)
+        {
+            if (Contains(write, name) || Contains(high, name) || Contains(forbidden, name) || Contains(target, name))
+                return;
+            target.Add(name);
+        }
+
+        foreach (var name in ExcelDataOperationsContract.WriteOpNames)
+        {
+            if (name.StartsWith("delete_", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, ExcelDataOperationsContract.BreakExternalLink, StringComparison.OrdinalIgnoreCase))
+                Ensure(high, name);
+            else
+                Ensure(write, name);
+        }
+
+        for (var i = forbidden.Count - 1; i >= 0; i--)
+        {
+            if (forbidden[i] is JsonValue value && value.TryGetValue<string>(out var name) &&
+                name.Equals("delete_sheet", StringComparison.OrdinalIgnoreCase))
+                forbidden.RemoveAt(i);
+        }
+
+        foreach (var name in new[]
+                 {
+                     "close_workbook", "fill_range", "auto_fill", "calculate",
+                     "set_tab_color", "set_outline", "set_view", "import_csv", "export_csv", "set_page_breaks",
+                 })
+            Ensure(write, name);
+        foreach (var name in new[] { "delete_sheet", "delete_rows", "delete_cols", "save_workbook", "export_pdf" })
+            Ensure(high, name);
+    }
+
+    private static bool Contains(JsonArray array, string name) =>
+        array.Any(node => node is JsonValue value && value.TryGetValue<string>(out var item) &&
+                          item.Equals(name, StringComparison.OrdinalIgnoreCase));
 
     private JsonObject? AppPolicy(string app) => Json.GetObj(_policy, "apps")?[app] as JsonObject;
 

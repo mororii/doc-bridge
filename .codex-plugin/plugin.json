@@ -1,6 +1,6 @@
 {
   "name": "doc-bridge",
-  "version": "0.4.21+codex.20260910024430",
+  "version": "0.4.22+codex.20260917130129",
   "description": "Control local Microsoft Excel, Hancom HWP, AutoCAD and GstarCAD through a safety-gated MCP server.",
   "author": {
     "name": "DocBridge Local"

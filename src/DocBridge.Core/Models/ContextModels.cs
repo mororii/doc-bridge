@@ -77,6 +77,7 @@ public sealed class ApplyExecution
     public List<DiffEntry> Diff { get; } = new();
     public JsonArray OperationResults { get; } = new();
     public JsonObject? Readback { get; set; }
+    public JsonArray Formula2Readbacks { get; } = new();
     public JsonObject? Interaction { get; set; }
     public List<string> Warnings { get; } = new();
     public List<string> Errors { get; } = new();

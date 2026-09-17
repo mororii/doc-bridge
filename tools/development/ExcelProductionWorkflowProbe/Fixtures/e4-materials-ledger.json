@@ -1,0 +1,12 @@
+{
+  "disclaimer": "기능검증용 가상 데이터.",
+  "table": "자재표",
+  "safetyStock": 10,
+  "rows": [
+    { "id": "TX-001", "date": "2026-09-01", "item": "PVC관", "spec": "D300", "in": 120, "out": 40 },
+    { "id": "TX-002", "date": "2026-09-03", "item": "맨홀", "spec": "1호", "in": 10, "out": 3 },
+    { "id": "TX-003", "date": "2026-09-05", "item": "PVC관", "spec": "D300", "in": 50, "out": 65 }
+  ],
+  "add": { "id": "TX-004", "date": "2026-09-08", "item": "PVC관", "in": 20, "out": 5 },
+  "expectedRemain": { "pvc": 65, "manhole": 7, "pvcAfterAdd": 80 }
+}

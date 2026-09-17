@@ -1,8 +1,8 @@
 # Excel 기본 편집 operations
 
 DocBridge는 Excel 화면을 클릭하거나 VBA를 실행하지 않고, 실행 중인 Excel의 ActiveX COM
-객체를 통해 workbook을 직접 읽고 수정한다. 이 문서는 `excel_apply_ops`에 추가된 기본 편집
-5종과 `excel_read_range(includeLayout:true)`의 안전 계약을 설명한다.
+객체를 통해 workbook을 직접 읽고 수정한다. 이 문서는 `excel_apply_ops`의 현재 작성·레이아웃·수명주기·데이터 객체 계약과
+`excel_read_range(includeLayout:true)`의 안전 계약을 설명한다.
 
 ## 연결 사전검사와 파일 열기
 
@@ -11,10 +11,40 @@ DocBridge는 Excel 화면을 클릭하거나 VBA를 실행하지 않고, 실행 
 열린 workbook이 없으면 상태조회·컨텍스트·쓰기는 새 Excel을 만들지 않으며, 상태 변화 없이
 같은 호출을 반복하지 않는다. ping·전체 앱 status·반복 context·전체 시트 읽기를 강제하지 않는다.
 
+### 지정 창 고정 (instance pin)
+
+여러 Excel이 열려 있으면 자동 선택이 엇갈릴 수 있다. 사용자가 지목한 창에서만
+작업하려면 `excel_launch`로 핀을 박는다. 핀은 `%LOCALAPPDATA%\DocBridge`의
+`excel-instance-pin.json`에 저장되어 CLI와 MCP가 공유한다.
+
+- `{"processId": 1234}` 또는 `{"hwnd": 5678}`, 둘의 쌍으로 지정한다.
+  `excel_get_active_context`의 `openWorkbooks[].processId`/`excelHwnd`를 그대로 쓴다.
+- `{"activeWindow": true}`는 현재 포그라운드 Excel 창을 지정한다.
+  (inline-ai의 포그라운드/HWND 추적과 같은 원칙. 최소화된 창은 hwnd가
+  비어 보일 수 있어 복원 후 지정한다.)
+- `{"clearPin": true}`는 핀을 지운다. 지정자·`dedicatedInstance`와 함께 쓸 수 없다.
+- 핀이 있으면 이후 모든 호출이 그 창에만 붙는다. 핀 창이 사라지면 다른 창을
+  몰래 쓰지 않고 `[EXCEL_PINNED_INSTANCE_GONE]`으로 중단한다.
+- 핀 없이 호출하면 종전 자동 선택 그대로다. `dedicatedInstance`는 핀을 건드리지 않는다.
+
 `excel_read_range`와 `excel_inspect`도 workbook 경로만으로 닫힌 파일을 자동으로 열지 않는다.
 사용자가 닫힌 기존 파일을 열어 읽으라고 명시한 경우에만 존재하는 절대 경로와
 `allowOpenFile:true`를 함께 쓴다. 이 옵션은 읽기 전용이며 Excel 쓰기에는 사용할 수 없다.
 쓰기 대상은 먼저 Excel에서 열어야 한다.
+
+## Formula trace (read-only)
+
+`excel_inspect`의 `scope:"formula_trace"`는 전체 workbook을 스캔하지 않고 지정한 수식 셀에서
+상류 의존 셀을 추적한다. 이 scope에는 기존 workbook routing의 명시 `workbook`, 명시 `sheet`,
+그리고 연속 A1 `range`가 모두 필요하다. `maxDepth`(기본 4, 최대 20)와 `maxCells`(기본 500,
+최대 5,000)는 항상 적용된다.
+
+반환된 `nodes`는 실제 읽은 workbook/sheet/address/value/formula와 Formula2 읽기 상태를 담고,
+`edges`는 실제로 읽은 대상 셀에만 연결한다. `coverage.complete:false`, `frontier`,
+`truncationReasons`, `unresolved`는 제한·미지원 참조가 남았음을 뜻하며 완전한 영향 분석이라고
+과장하지 않는다. 외부 workbook은 따라가지 않으며, `INDIRECT`/`OFFSET`, 3D, 표 구조 참조,
+깨진 참조, 상수·표현식 이름은 reason과 함께 unresolved로 남긴다. 상세 계약은
+[EXCEL-FORMULA-TRACE.md](EXCEL-FORMULA-TRACE.md)를 따른다.
 
 DocBridge 오류나 제약을 `openpyxl`, `pywin32`/직접 Excel COM, PowerShell Excel COM,
 `Start-Process` 또는 UI 자동화로 우회하지 않는다. 도구 오류와 필요한 사용자 조치를 보고하고
@@ -23,14 +53,19 @@ DocBridge 오류나 제약을 `openpyxl`, `pywin32`/직접 Excel COM, PowerShell
 
 ## 지원 범위
 
-| op | 용도 | 필수 입력 |
+아래는 현재 `excel_apply_ops` 가족이다. 기본 5개 op만 있는 제품이 아니다.
+`core_get_capabilities({"app":"excel"})`의 `writeOps`가 권위 목록이다.
+
+| 가족 | 대표 op | 비고 |
 | --- | --- | --- |
-| `merge_cells` | 직사각 범위를 하나의 셀로 병합 | `range`; `target.sheet` 또는 시트 한정 `range` |
-| `unmerge_cells` | 지정 범위 안의 병합 영역을 해제 | `range`; `target.sheet` 또는 시트 한정 `range` |
-| `set_rows_hidden` | 연속된 행을 숨기거나 다시 표시 | `target.sheet`, `row`, `count`, `hidden` |
-| `set_cols_hidden` | 연속된 열을 숨기거나 다시 표시 | `target.sheet`, `col`, `count`, `hidden` |
-| `set_sheet_visibility` | 워크시트를 일반 숨김 또는 표시 | `target.sheet`, `visibility` (`visible` 또는 `hidden`) |
-| `format_range` | 지정 범위의 글꼴·채우기 등 기본 서식 | `range`, `style`; `target.sheet` 또는 시트 한정 `range` |
+| 값/수식 | `set_values`, `set_formulas`, `clear_range`, `fill_range`, `auto_fill` | JSON 타입 유지. Formula2는 opt-in. `""`는 빈 칸 |
+| 병합 | `merge_cells`, `unmerge_cells` | 같은 종류만, 비겹침 batch. 31개월 머리글은 merge-only 한 batch |
+| 서식/레이아웃 | `format_range`, `set_row_heights`, `set_column_widths`, `freeze_panes`, `set_page_setup`, `set_page_breaks`, `set_view` | `set_view`는 대상 시트를 활성화해 읽고 원래 활성 시트·선택·스크롤을 되돌린다 |
+| 표시 | `set_rows_hidden`, `set_cols_hidden`, `set_sheet_visibility` | visibility-only batch; `veryHidden` 포함, 마지막 표시·활성 시트 보호 |
+| 구조 | `insert_rows`/`cols`, `delete_rows`/`cols`, `add_sheet`, `copy_sheet`, `move_sheet`, `rename_sheet`, `delete_sheet` | `delete_sheet`는 다른 시트 수식·이름·차트·피벗 의존을 캡처. 표 참조·같은 책 `[owned.xlsx]Sheet`·3D는 유지. 못 캡처하면 삭제 전 거절 |
+| 수명주기 | `create_workbook`, `open_workbook`, `save_workbook`, `close_workbook`, `export_pdf` | 소유 Application 자동 Quit는 빈 컬렉션만 |
+| 데이터 객체 | 표, 이름, 유효성, 조건부 서식, 차트, 그림, 메모, 링크, `create_pivot`/`update_pivot`/`refresh_pivot`/`delete_pivot` | 같은 통합문서 피벗은 지원. 피벗 **캐시/외부 연결**만 범위 밖 |
+| 통합문서·고급 개체 | 외부 링크 3종, 계산 모드, 값 고정, 선택 붙여넣기, 목표값 찾기, 통합문서 보호 2종, 창 분할, 스파크라인 3종, 슬라이서 2종, 셀 스타일 | [EXCEL-WORKBOOK-OPS.md](EXCEL-WORKBOOK-OPS.md); VBA·매크로는 범위 밖 |
 
 모든 Excel 쓰기는 활성 시트를 추정하지 않는다. `target.sheet`와 시트 한정 범위를 함께
 사용하면 두 시트명이 정확히 같아야 한다. 여러 workbook이 열려 있으면 먼저
@@ -61,6 +96,32 @@ DocBridge 오류나 제약을 `openpyxl`, `pywin32`/직접 Excel COM, PowerShell
 
 읽기는 `maxReadCells` 한도 안에서 반환된다. `coverage.complete:false`이면 반환된 일부 상태만
 보고 전체 범위라고 단정하지 말고 더 작은 범위로 나누어 다시 읽는다.
+
+## 범위 읽기 페이지
+
+`excel_read_range`는 요청 `range` 전체를 먼저 `Value2`/`Formula` 배열로 만들지 않는다. 각 호출은
+기본 최대 10,000 셀(더 작은 `maxCells` 지정 가능)의 직사각형 페이지 하나만 COM에서 읽는다.
+`rowOffset`과 `columnOffset`은 요청 range 안의 0-based 위치이며, `maxRows`/`maxColumns`로 더 작은
+페이지를 정할 수 있다. 응답의 `range`와 `requestedRange`는 원래 요청, `returnedRange`는 실제 읽은
+주소다. `coverage.complete`는 이 응답 하나가 원래 요청 전체를 포함할 때만 true다.
+`coverage.hasMore`는 다음 페이지 존재 여부이고, `coverage.continuation`이 있으면 다음 요청에 그대로
+합친다. `rowOffset`/`columnOffset`도 coverage에 반환한다. 가로 타일은 한 행씩 진행해 마지막 좁은
+타일에서도 셀을 빠뜨리거나 중복하지 않는다.
+
+```json
+{
+  "sheet": "공정표",
+  "range": "A1:XFD500",
+  "maxCells": 10000,
+  "includeFormulas": true,
+  "formulaMode": "formula2"
+}
+```
+
+`formulaMode`는 `includeFormulas:true`일 때만 사용한다. 기본 `formula`는 기존 `Range.Formula`와
+호환되고, 동적 배열 의미론은 명시적으로 `formula2`를 요청한다. `formula2`를 요청한 COM 읽기가
+실패하면 `Formula`로 조용히 대체하지 않고 오류를 반환한다. 여러 area로 이루어진 비연속 range는
+지원하지 않으며 명확히 거절한다.
 
 ## 쓰기 경로
 
@@ -160,19 +221,9 @@ bool/글꼴 크기/`NumberFormat`은 범위 빠른 경로를 쓰고, 혼합·색
 preview 토큰은 새 dry-run이 필요할 수 있다. `MaxFormatSnapshotCells`는 100,000,
 STA COM 한도는 120초로 그대로다.
 
-같은 검사 도구의 표본은 [PERFORMANCE.md](PERFORMANCE.md)에 있다.
-1,000셀 균일 Bold는 이전 안정화 후보와 개선 후보(legacy·execute)가 전수 mismatch 0으로
-통과했고, 7,000셀 균일 Bold execute도 전수 mismatch 0으로 통과했다(제품 합계 0.459초).
-1,000셀 혼합의 제품 합계는 legacy 20.903초, execute 11.182초다. 실제 COM 장애 뒤 원복,
-UUID 재전송 challenge/conflict, 작은 회귀 9건도 통과했다. 보호시트 건은
-`rollback.verified=false`를 숨기지 않으며 원복 성공이 아니다. 7,000셀 혼합 execute는
-전수 7,000셀 검증이 통과했지만 execute 전체 52.154초(그중 snapshot 51.864초, 실제
-apply 0.169초), restore 30.655초, 합 82.809초다. 별도 native 81.523초는 제품 합계에
-넣지 않는다. 균일 0.459초와 혼합 82.809초는 다른 작업이다. 만능 속도 배수를 만들지
-않는다. 각 행은 단일 표본이며 동일 워크스테이션의 세션/캐시/부하 차이가 있다.
-
-다른 시트의 부풀린 UsedRange는 가용성 회복이지 일반 속도 개선이 아니다. 당시 후보가
-대상만 스냅샷해 통과한 기록은 역사적 가용성 증거이며 현재 소스의 최종 시간이 아니다.
+검사 도구 표본과 한계는 [PERFORMANCE.md](PERFORMANCE.md)에 있다. 균일 Bold와
+혼합 색/서식은 다른 작업이며 만능 속도 배수를 만들지 않는다. 보호된 시트에서 Bold
+COM이 거절되면 `rollback.verified=false`를 숨기지 않는다.
 
 ## 1. 셀 병합
 
@@ -194,8 +245,19 @@ Excel은 병합 범위의 좌상단 셀 값만 유지한다. DocBridge는 데이
 부분적으로 겹치는 범위도 거부하며, 셀별 서식까지 정확히 스냅샷·복원할 수 있도록 한 번에 최대
 2,000셀까지만 분석한다.
 
-`merge_cells`와 `unmerge_cells`는 정확한 작업 범위 복구를 위해 한 batch에서 단독 op로만
-실행한다. 값 입력이나 서식 변경은 별도 dry-run batch로 나눈다.
+읽기·ClearContents·읽기 실패는 `[EXCEL_MERGE_UNPROVEN_CELL]`로 Merge 전에 중단한다.
+이미 진짜 빈 칸(Value2가 null/DBNull)은 건드리지 않는다. 좌상단 밖 상수 빈 문자열만
+ClearContents한 뒤, 그 Value2가 진짜 빈 칸인지 다시 본다. Formula는 `""`여도 된다.
+ClearContents가 no-op이라 Value2가 `""`로 남으면 Merge하지 않는다. 이 검사는
+`set_values`의 `""`≈빈 칸 동등과 다르다. 네이티브가 빈 문자열을 남기는 경우가 있어
+후자를 쓰면 확인된 병합 경고가 다시 날 수 있다.
+
+`merge_cells`와 `unmerge_cells`는 서로 섞거나 값/서식과 한 batch에 넣을 수 없다.
+같은 종류의 비겹침 범위는 한 batch에서 최대 400개까지 허용한다. 겹치면
+`[EXCEL_MERGE_BATCH_OVERLAP]`으로 배치 전체가 거부된다. 31개월 머리글 쌍
+(`G5:H5`, `I5:J5`, … 총 31개 인접 두 열)은 하나의 merge-only batch다. 스냅샷
+`restoreMode`는 `merge-state`다. 한 개 op는 v1 봉투를 유지하고, 여러 개는 v2
+`entries[]`를 역순 복구한다.
 
 ## 2. 병합 해제
 
@@ -432,6 +494,147 @@ DocBridge는 각 행·열의 원래 hidden 값과 시트의 표시 상태, 원�
 정확한 자동 복구를 위해 visibility op와 값·수식·서식·복사·병합 op는 같은 batch에 섞을 수
 없다. 먼저 visibility batch를 완료하고 readback한 뒤, 후속 편집을 새 dry-run으로 실행한다.
 
+## 5. 레이아웃·작성·수명주기
+
+같은 가족끼리만 한 batch에 넣는다. `executionMode=execute` allowlist는 기존처럼
+`set_values`/`set_formulas`/`format_range`만이다. 아래 op는 dry-run + confirmToken이다.
+
+| op | 입력 | 스냅샷 |
+| --- | --- | --- |
+| `set_row_heights` | `rows:[{row, count?, heightPoints\|autoFit}]`. 단위는 Excel 포인트 0.1–409.5 | `sheet-layout-state` |
+| `set_column_widths` | `columns:[{col, count?, widthChars\|autoFit}]`. 단위는 문자 너비 0–255 | `sheet-layout-state` |
+| `freeze_panes` | `cell:"G6"` 또는 `rows`/`columns` 또는 `unfreeze:true`. G6 → xSplit=6, ySplit=5 | `sheet-layout-state` |
+| `set_page_setup` | `page.scale`이 fit보다 우선. A3=8. 여백은 mm | `sheet-layout-state` |
+| `rename_sheet` | `target.sheet`, `newName` | `rename-state` |
+| `clear_range` | `what`: all\|contents\|formats\|formulas | `range-edit-state` |
+| `copy_range` | `destRange`, `mode`: all\|values\|formulas\|formats | `range-edit-state` |
+| `delete_rows` / `delete_cols` | 고위험. 삭제 띠의 값/수식/서식/크기를 스냅샷 | `delete-strip-state` |
+| `add_sheet` / `move_sheet` | `copy_sheet`는 계속 단독 batch | `sheet-structure-state` |
+| `delete_sheet` | 고위험. 쓰기 전 현재 workbook 사본. 다른 시트 수식·이름·차트·피벗 의존을 캡처. 표/`[owned.xlsx]Sheet`/3D는 유지. 못 캡처하면 삭제 전 거절 | `sheet-structure-state` + `workbook-copy-sheet` |
+| `set_view` | 대상 시트를 활성화해 Zoom/눈금/보기 모드를 읽고 쓴다. 끝나면 원래 활성 시트·선택·스크롤을 되돌린다 | `sheet-layout-state` |
+| `fill_range` / `auto_fill` | `auto_fill`은 채운 띠의 수열/상대 수식을 검사 | `extended-ops` |
+| `import_csv` / `export_csv` | 같은 `delimiter`. import는 파싱 중 셀 수 상한 | `extended-ops` |
+| `set_outline` | `axis` row\|column. `show:false`는 접기이며 ClearOutline이 아님 | `extended-ops` |
+| `set_page_breaks` | 기본 `orientation=row`는 전체 행(`Rows(n).PageBreak`). `column`은 전체 열. 셀 `Range.PageBreak`는 쓰지 않음. readback은 H/VPageBreaks Location | `extended-ops` |
+| `set_formulas` | 기본 `engine=formula`. `formula2`는 명시 opt-in | 수식 배치 또는 legacy used-range |
+| `protect_sheet` / `unprotect_sheet` | 암호 필드 거부. UI-only 보호 | `protect-state` |
+| `create_workbook` / `open_workbook` | 각각 단독. 실행 중인 Excel에만 연결하며 사용자 창을 닫지 않음 | `lifecycle-state` |
+| `save_workbook` / `export_pdf` | 고위험. 보호된 원본 경로 거부. 기존 파일은 `overwrite:true` | `lifecycle-state` |
+| `close_workbook` | 명시 `target.workbook`만. 활성 창 close 금지 | `lifecycle-state` |
+
+owned Application을 만들었다는 것은 그 뒤에 열린 모든 통합문서의 소유가 아니다.
+`Saved=true`만으로 `Application.Quit`하지 않는다. 암시적 dispose·연결 해제는
+비어 있지 않은 Workbooks 컬렉션을 보존한 채 detach한다. auto-Quit는 workbook이
+0개인 소유 인스턴스에만 허용한다. 특정 파일을 닫는 경로는 `close_workbook`이다.
+
+lifecycle rollback은 신원을 실제로 확인했을 때만 `verified`/`complete`다.
+확인 0건은 `unproven`이다. 기존 통합문서가 사라지면 `incomplete`이며 재생성하지 않는다.
+ROT/창 탐색이 어댑터가 이미 가진 Application RCW와 같으면 그 alias를 FinalRelease하지 않는다.
+
+## ExtendedOps와 Formula2 한계
+
+이 절은 지원을 과장하지 않기 위한 현재 계약이다. 실물 문서 검증과 로컬 플러그인
+반성이 끝나기 전에는 Excel 완성을 주장하지 않는다.
+
+`delete_sheet` 복구는 소유한 **현재** workbook 사본(`SaveCopyAs` current-memory 또는
+`Saved=true`인 last-saved-file)에서 시트 전체를 다시 복사한 뒤, 다른 시트의 수식·이름·차트
+시리즈·피벗 원본을 다시 쓴다. `=Data!A1+SUM(Items[Amount])`, 같은 책
+`'[owned.xlsx]Sheet'!A1`, 3D `Data:Summary!A1`은 캡처한다. 실제 다른 파일/백업 토큰만
+제외한다. `[`가 하나 있다고 전부 버리지는 않는다. 닫히지 않은 `[`나 알 수 없는 대괄호는
+`[EXCEL_DELETE_SHEET_DEPENDENCY_UNCAPTURED]`로 **삭제 전에** 거절한다. used-range
+값·NumberFormat·탭 색만 되살리는 경로는 전체 복구로 인정하지 않으며, 사본이 없으면
+쓰기 전에 거절한다.
+
+`auto_fill` readback은 원본 블록 보존에 더해 채운 영역의 내용, 숫자 수열, 상대 수식 연속을
+검사한다. `copy_range`의 formulas/all 모드는 원본 수식 문자열과 목적지를 그대로 비교하지
+않고 A1 상대 참조를 이동한 뒤 비교한다.
+
+`set_values`는 JSON 타입을 유지한다. 문자열 `"2026-09-10"`은 텍스트이며 일련번호 46275가 아니다.
+`"123"`과 숫자 `123`은 다르다. 문자열은 잠시 `@`로 쓴 뒤 **원래 NumberFormat을 되돌린다**.
+혼합 NumberFormat은 범위에서 null이므로 셀마다 캡처하고, 캡처에 실패하면 `@`를 쓰지 않는다.
+공개 fixture의 `General`은 그대로 둔다. 한국어 Excel이 `NumberFormat="General"`에서
+`0x800A03EC`를 내면 `Application.International(26)` 이름(`G/표준` 등)으로
+`NumberFormatLocal`만 보조 기록한다. 요청 값을 빼거나 다른 서식으로 바꾸지 않는다.
+복구는 Value2 예외를 포함해 finally에서 하며, 유지된 형식을 다시 읽는다. `""`는 빈 칸으로
+정규화될 수 있다. 값 readback은 한 번의 `Value2` 행렬과 타입 비교다.
+수식은 `set_formulas`만 쓴다.
+
+`calculate`는 `Workbook.Calculate`나 `Application.Calculate`를 호출하지 않는다. 범위가 있으면
+그 Range만, 없으면 대상 workbook의 각 Worksheet에서 `Calculate`하고 CalculationState를 확인한다.
+
+`set_formulas`의 기본 엔진은 legacy `Range.Formula`다. Formula2는 `engine`/`formulaEngine`/
+`formula2:true`로만 켠다. FILTER/SORT/UNIQUE는 `spillRows`를 요구하지 않는다. 쓰기 후 실제
+spill이 dest에 붙어 있으면 성공으로 둔다. 네이티브 속성은 `SpillingToRange`이며, 조회
+실패는 dest 크기 scalar로 취급하지 않는다. 롤백은 dest와 새로 소유한 spill을 **먼저**
+지운 뒤 이전 Formula2와 원래 spill을 복구한다. 복구 증거는 복원된 수식과 셀 값이다.
+쓰기 횟수는 증거가 아니다. 막힌 spill(`hasSpill` false/null)은 이웃 사용자 데이터를
+지우지 않는다. 상수 SEQUENCE 또는 명시한 spill 힌트만 캡처보다 큰 spill을 거절한다.
+주소는 `$`를 제거한 뒤 비교한다. 한 batch에 formula와 formula2가 같이 있으면 op마다
+엔진을 유지한다.
+
+`set_view`와 레이아웃 스냅샷은 대상 시트를 활성화해 그 창의 Zoom/눈금/보기 모드를 읽거나
+쓴 다음, 원래 활성 시트·선택·스크롤을 되돌린다. 숨긴 시트의 창 설정은 읽지 않는다.
+행 높이 픽셀 매핑은 대상 통합문서 창을 쓰고, 다른 책이 활성이거나 Zoom이 100이 아니면
+그 창을 다시 잰다.
+
+`set_page_setup`의 `printArea`/`printTitleRows`/`printTitleColumns`는 `$`를 뺀 범위
+문법만 비교한다. `1:2`와 Excel `$1:$2`는 같다. 머리글·바닥글 문자열은 그대로 비교한다.
+불일치는 필드별 expected/actual로 남긴다.
+
+`import_csv`는 파서가 필드를 추가할 때 셀 수를 세고 `MaxImportCells`를 넘기면 테이블을
+다 만들기 전에 거절한다. export도 같은 delimiter로 다시 읽어 값 동등을 확인한다.
+
+자동화 락은 `DOCBRIDGE_HOME`/RootDir마다 다른 named mutex를 쓴다. 집을 나눈 프로세스는
+서로 60초씩 기다리지 않는다. 같은 집을 쓰는 프로세스는 여전히 직렬화된다.
+
+`format_range.style`는 `fontName`, `horizontalAlign`, `verticalAlign`, `wrapText`, `borders`를
+쓴다. `left/right/top/bottom`은 **각 셀** 변, `outline`은 범위 둘레,
+`insideHorizontal`/`insideVertical`은 내부 격자, `all`은 셀 변+내부다. `medium`은 굵기다.
+새 키는 deferred-format 자격에서 제외된다. v2/v3 written-properties 복구는 유지한다.
+
+인접 범위는 변 객체를 공유한다. `A16:E18` 지우기는 `F16:H18` 아웃라인의 왼쪽 변도
+함께 지운다. 같은 배치에서 공유 변에 그리기 뒤 지우기가 오면
+`[EXCEL_BORDER_ORDER]`로 거절한다(지우기→그리기 순서나 배치 분리로 해결).
+다른 배치의 간섭은 dry-run 경고 `[EXCEL_BORDER_SHARED_EDGE]`로 알린다.
+readback은 배치 자신의 op만 검증하므로, 테두리 작업 후에는 기존 둘레를 엣지
+단위로 재확인한다.
+
+데이터/보고 op(표, 정렬/필터, 이름, 유효성, 조건부 서식, 차트, 그림, 메모, 하이퍼링크,
+`create_pivot`/`update_pivot`/`refresh_pivot`/`delete_pivot`)는 별도 data-only batch이며
+`restoreMode=data-objects`다. execute allowlist에 넣지 않는다. 피벗 **캐시/외부 연결**과
+매크로·암호 시트는 범위 밖이다. 같은 통합문서 안의 시트 피벗 만들기는 지원한다.
+
+## 도형·텍스트 상자 실무 서식
+
+기존 `insert_shape`, `update_shape`, `insert_textbox`, `update_textbox`는 `fillColor`/`text`/`position`에
+더해 다음 선택 필드를 지원한다. 생략한 필드는 기존 값을 보존하며, `null`은 생략이 아니므로 거절한다.
+
+- `lineColor`: 기존 OLE/`#RRGGBB` 색상 계약
+- `lineWeight`: 0 초과 20 이하의 유한 point 수
+- `lineVisible`: boolean (`false`는 선을 숨김)
+- `rotation`: 정수 degree `0..360`; `360`은 readback에서 `0`으로 정규화
+- `font`: 전체 도형/텍스트 상자 텍스트에 적용하는 부분 객체 `{name,size,bold,italic,color}`. 지정한
+  font 속성만 바꾸며, run별 rich text 편집은 이 계약에 포함되지 않는다.
+
+`excel_inspect`와 data-object apply readback은 `lineColor`, `lineWeight`, `lineVisible`, `rotation`, `font`를
+반환하려 시도한다. COM이 개별 속성을 읽지 못하면 `...Unreadable`/`fontUnreadableFields`를 명시하며,
+요청한 필드를 읽지 못한 apply는 성공으로 간주하지 않는다.
+
+```json
+{
+  "ops": [{
+    "op": "update_shape",
+    "target": { "sheet": "월간보고" },
+    "name": "HighlightBox",
+    "lineColor": "#112233",
+    "lineWeight": 1.5,
+    "lineVisible": true,
+    "rotation": 90,
+    "font": { "name": "Arial", "size": 11, "bold": true, "color": "#FFFFFF" }
+  }]
+}
+```
+
 ## Microsoft 공식 근거
 
 초보·실무 교육 주제를 기능 범위로 정할 때 참고한 Microsoft Support 자료:
@@ -449,18 +652,18 @@ DocBridge의 직접 COM 구현과 readback 계약을 확인할 때 참고한 Mic
 - [Range.Hidden property](https://learn.microsoft.com/en-us/office/vba/api/excel.range.hidden): 전체 행 또는 전체 열의 숨김 상태를 읽고 설정한다.
 - [Worksheet.Visible property](https://learn.microsoft.com/en-us/office/vba/api/excel.worksheet.visible): 워크시트 표시 상태를 읽고 설정한다.
 - [XlSheetVisibility enumeration](https://learn.microsoft.com/en-us/office/vba/api/excel.xlsheetvisibility): `xlSheetVisible`, `xlSheetHidden`, `xlSheetVeryHidden`의 의미와 값을 정의한다.
+- [Shape.Rotation property](https://learn.microsoft.com/en-us/office/vba/api/excel.shape.rotation): rotation은 degree이며 Excel은 가장 가까운 정수로 반올림한다.
+- [Shape.Line property](https://learn.microsoft.com/en-us/office/vba/api/excel.shape.line) 및 [LineFormat](https://learn.microsoft.com/en-us/office/vba/api/excel.lineformat): 선 색/두께/표시 상태를 제공한다.
+- [TextFrame.Characters method](https://learn.microsoft.com/en-us/office/vba/api/excel.textframe.characters): start/length 생략은 전체 텍스트를 선택하며 `Characters.Font`를 쓸 수 있다.
 
 ## 후속 단계 매트릭스
 
 아래 항목은 현재 지원을 과장하지 않기 위한 계획 구분이며 일정 확약이 아니다.
 
-| 단계 | 기능군 | 상태 | 구현 전 필수 검증 |
-| --- | --- | --- | --- |
-| 1차 | 병합/병합 해제, 행·열 숨김/표시, 시트 일반 숨김/표시, `includeLayout` 읽기, `format_range` 별칭·v3 written-properties 스냅샷, execute allowlist | 구현·정책·스냅샷·readback 제공. 균일/혼합 1,000·7,000셀과 COM 원복·UUID 재전송은 [PERFORMANCE.md](PERFORMANCE.md). 균일 0.459초와 혼합 82.809초는 구분 | 실제 Excel E2E, `rollback.verified` 확인, 정상 disconnect/파이프 회수. 크래시 잔류는 미해결. 부풀림 통과는 가용성이지 속도 개선이 아님 |
-| 2차 | 행 높이, 열 너비, AutoFit, 줄 바꿈, 정렬, 테두리 | 후보 | 혼합 셀 상태의 정확한 스냅샷과 단위/자동맞춤 readback |
-| 3차 | 행·열 삽입/삭제 확장, 고정 창, 그룹/윤곽, 정렬·필터 | 후보 | 필터 숨김과 수동 숨김 구분, 구조 변경 후 주소 재계산 |
-| 4차 | 표(ListObject), 이름 정의, 데이터 유효성, 조건부 서식 | 후보 | 수식·이름 범위·테이블 참조 보존과 operation-scoped 복구 |
-| 5차 | 차트·피벗 수정, 페이지 설정·인쇄 영역·PDF 출력 | 후보 | 캐시/외부 연결, 출력 파일 교체 승인, 실제 렌더 검증 |
+| 구분 | 기능군 | 상태 |
+| --- | --- | --- |
+| 지원 | 병합 batch, 서식, 행·열 크기, 고정 창, 페이지 설정, 이름 변경, 범위 지우기/복사, 행·열 삭제, 시트 추가/이동, 보호, 수명주기/저장/PDF, 표/차트/이름/유효성/조건부 서식, 같은 통합문서 피벗 | 제품 코드·정책·스키마·단위 테스트. 실물 COM 완료는 별도 검증 |
+| 범위 밖 | 피벗 캐시/외부 연결, 매크로, 암호 시트 | 별도 보안·환경 |
 
 새 기능은 `core_get_capabilities({"app":"excel"})`의 `writeOps`, `limits`, `safety`에 노출되고,
 정책 allowlist·MCP 스키마·단위 테스트·실제 Excel E2E가 함께 통과한 뒤에만 지원 완료로 표시한다.

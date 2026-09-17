@@ -1,0 +1,6 @@
+{
+  "disclaimer": "기능검증용 가상 데이터. 사진은 샘플.",
+  "people": { "skilled": 6, "labor": 4, "staff": 3, "total": 13 },
+  "equipment": { "a": 2, "b": 1, "total": 3 },
+  "pictures": ["e3-photo-1.png", "e3-photo-2.png"]
+}

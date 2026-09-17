@@ -1,0 +1,14 @@
+{
+  "ok": true,
+  "version": "0.4.21",
+  "apps": {
+    "excel": {
+      "available": true,
+      "connected": true,
+      "program": "excel",
+      "version": "16.0",
+      "document": "통합 문서1",
+      "detail": "사용자가 열어 둔 엑셀 창에 연결됨"
+    }
+  }
+}

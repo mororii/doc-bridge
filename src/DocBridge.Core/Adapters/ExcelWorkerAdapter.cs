@@ -209,6 +209,9 @@ public sealed class ExcelWorkerAdapter : IAppAdapter, IConnectionLifecycleAdapte
 
     public JsonObject Disconnect() => Call("disconnect");
 
+    public JsonObject Launch(JsonObject? args) =>
+        Call("launch", new JsonObject { ["args"] = args?.DeepClone() ?? new JsonObject() });
+
     private JsonObject Call(string method, JsonObject? payload = null)
     {
         lock (_gate)
@@ -419,6 +422,7 @@ public static class ExcelWorkerProcess
             Json.GetObj(request, "metadata") ?? new JsonObject(),
             ParseOps(request)),
         "disconnect" => adapter.Disconnect(),
+        "launch" => adapter.LaunchExcelInstance(Json.GetObj(request, "args") ?? new JsonObject()),
         _ => throw new InvalidDataException($"unknown Excel worker method '{method}'"),
     };
 

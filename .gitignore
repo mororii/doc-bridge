@@ -14,6 +14,9 @@ reports/
 research/
 tmp/
 .tmp/
+RESULT-HERMES.md
+STATUS.md
+tests/DocBridge.Core.Tests/evidence/
 
 # IDE and OS files
 .vs/

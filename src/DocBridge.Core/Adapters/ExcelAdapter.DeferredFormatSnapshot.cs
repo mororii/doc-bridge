@@ -41,6 +41,8 @@ public sealed partial class ExcelAdapter
         ExcelStyleContract.NumberFormat,
         ExcelStyleContract.FillColor,
     };
+
+    internal static bool IsDeferredWrittenStyleKey(string key) => DeferredWrittenStyleKeys.Contains(key);
     private static readonly HashSet<string> AllowedRelationshipLocals = new(StringComparer.OrdinalIgnoreCase)
     {
         "officeDocument",

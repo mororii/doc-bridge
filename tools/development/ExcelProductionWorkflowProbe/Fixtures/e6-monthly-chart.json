@@ -1,0 +1,8 @@
+{
+  "disclaimer": "기능검증용 가상 데이터.",
+  "plan": [10, 25, 40, 60, 80, 100],
+  "actual": [8, 23, 43, 57, 82, 98],
+  "marChanged": 45,
+  "marDiffChanged": 5,
+  "charts": ["PlanActualLine", "DiffColumn"]
+}

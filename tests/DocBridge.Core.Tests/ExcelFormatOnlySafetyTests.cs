@@ -893,6 +893,8 @@ public class ExcelFormatOnlySafetyTests
         public FormatWorksheet Sheet { get; }
         public int Row { get; }
         public int Column { get; }
+        public FormatRange Resize(int rows, int columns) =>
+            new(Sheet, new[] { ((Row, Column), (Row + rows - 1, Column + columns - 1)) });
         public FormatFont Font { get; }
         public FormatInterior Interior { get; }
         public string NumberFormat { get; set; }

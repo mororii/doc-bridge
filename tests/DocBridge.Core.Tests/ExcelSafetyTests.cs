@@ -115,12 +115,19 @@ public class ExcelSafetyTests
         Assert.NotNull(validator.Validate(alias, "excel", aliasErrors));
         Assert.Empty(aliasErrors);
 
+        var underline = Json.ParseObject("""
+        { "ops": [ { "op": "format_range", "target": { "sheet": "매출" }, "range": "A1", "style": { "underline": "single" } } ], "dryRun": true }
+        """);
+        var underlineErrors = new List<string>();
+        Assert.NotNull(validator.Validate(underline, "excel", underlineErrors));
+        Assert.Empty(underlineErrors);
+
         var unknown = Json.ParseObject("""
-        { "ops": [ { "op": "format_range", "target": { "sheet": "매출" }, "range": "A1", "style": { "underline": true } } ], "dryRun": true }
+        { "ops": [ { "op": "format_range", "target": { "sheet": "매출" }, "range": "A1", "style": { "shadow": true } } ], "dryRun": true }
         """);
         var unknownErrors = new List<string>();
         Assert.Null(validator.Validate(unknown, "excel", unknownErrors));
-        Assert.Contains(unknownErrors, error => error.Contains("underline") && error.Contains("not supported"));
+        Assert.Contains(unknownErrors, error => error.Contains("shadow") && error.Contains("not supported"));
     }
 
     [Fact]
@@ -139,7 +146,11 @@ public class ExcelSafetyTests
         Assert.Contains("set_rows_hidden", writeOps);
         Assert.Contains("set_cols_hidden", writeOps);
         Assert.Contains("set_sheet_visibility", writeOps);
+        Assert.Contains("set_row_heights", writeOps);
+        Assert.Contains("freeze_panes", writeOps);
+        Assert.Contains("save_workbook", writeOps);
         Assert.Equal(2_000, Json.GetInt(Json.GetObj(capabilities, "limits"), "maxMergeCells"));
+        Assert.Equal(400, Json.GetInt(Json.GetObj(capabilities, "limits"), "maxMergeBatchOperations"));
         Assert.Contains(Json.GetArr(capabilities, "safety")!, node =>
             string.Equals(node?.GetValue<string>(), "merge-content-loss-block", StringComparison.Ordinal));
     }

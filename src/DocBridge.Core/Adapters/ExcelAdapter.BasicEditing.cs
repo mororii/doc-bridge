@@ -16,11 +16,20 @@ public sealed partial class ExcelAdapter
     private const int XlSheetHidden = 0;
     private const int XlSheetVeryHidden = 2;
     private const int ExcelLayoutSnapshotVersion = 1;
+    private const int ExcelMergeBatchSnapshotVersion = 2;
     // Merge snapshots preserve per-cell formatting (including borders), which is
     // COM-call intensive. Keep the operation bounded to a practical rollback time.
     private const int MaxMergeOperationCells = 2_000;
+    private const int MaxMergeBatchOperations = 400;
     private const string VisibilityRestoreMode = "visibility-state";
     private const string MergeRestoreMode = "merge-state";
+    private const string SheetLayoutRestoreMode = "sheet-layout-state";
+    private const string RenameRestoreMode = "rename-state";
+    private const string RangeEditRestoreMode = "range-edit-state";
+    private const string DeleteStripRestoreMode = "delete-strip-state";
+    private const string StructureRestoreMode = "sheet-structure-state";
+    private const string ProtectRestoreMode = "protect-state";
+    private const string LifecycleRestoreMode = "lifecycle-state";
 
     private static readonly HashSet<string> VisibilityOperationNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -49,16 +58,28 @@ public sealed partial class ExcelAdapter
             ["sameDocumentConcurrentEditing"] = false,
         },
         ["readOps"] = new JsonArray("context", "range", "scan", "objects", "errors", "diagnostics", "layout"),
-        ["writeOps"] = new JsonArray(
+        ["writeOps"] = MergeWriteOps(
             "set_values", "set_formulas", "insert_rows", "insert_cols", "format_range",
             "find_replace", "copy_sheet", "merge_cells", "unmerge_cells",
-            "set_rows_hidden", "set_cols_hidden", "set_sheet_visibility"),
+            "set_rows_hidden", "set_cols_hidden", "set_sheet_visibility",
+            "set_row_heights", "set_column_widths", "freeze_panes", "set_page_setup", "set_view",
+            "rename_sheet", "clear_range", "copy_range", "delete_rows", "delete_cols",
+            "add_sheet", "move_sheet", "protect_sheet", "unprotect_sheet",
+            "create_workbook", "open_workbook", "close_workbook", "save_workbook", "export_pdf",
+            "fill_range", "auto_fill", "calculate", "delete_sheet", "set_tab_color",
+            "set_outline", "import_csv", "export_csv", "set_page_breaks"),
+        ["dataContract"] = ExcelDataOperationsContract.DescribeSchema(),
+        ["authoring"] = ExcelAuthoringSchema.DescribeApplyOpProperties(),
+        ["autoExecuteOps"] = new JsonArray("set_values", "set_formulas", "format_range"),
         ["limits"] = new JsonObject
         {
             ["maxReadCells"] = MaxCells,
             ["maxMergeCells"] = MaxMergeOperationCells,
+            ["maxMergeBatchOperations"] = MaxMergeBatchOperations,
             ["maxSnapshotCells"] = MaxSnapshotCells,
             ["maxDiffEntries"] = MaxDiff,
+            ["rowHeightUnit"] = "points",
+            ["columnWidthUnit"] = "character-width",
             ["maxRows"] = 1_048_576,
             ["maxColumns"] = 16_384,
         },
@@ -67,12 +88,49 @@ public sealed partial class ExcelAdapter
             "merge-content-loss-block", "last-visible-sheet-block", "active-sheet-hide-block"),
     };
 
+    private static JsonArray MergeWriteOps(params string[] core)
+    {
+        var result = new JsonArray();
+        foreach (var name in core) result.Add(name);
+        foreach (var name in ExcelDataOperationsContract.WriteOpNames) result.Add(name);
+        return result;
+    }
+
     private static bool IsVisibilityOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
         ops is { Count: > 0 } &&
         ops.All(op => VisibilityOperationNames.Contains(Json.GetString(op, "op") ?? ""));
 
     private static bool IsMergeOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
-        ops is { Count: 1 } && MergeOperationNames.Contains(Json.GetString(ops[0], "op") ?? "");
+        ops is { Count: > 0 } &&
+        ops.All(op => MergeOperationNames.Contains(Json.GetString(op, "op") ?? ""));
+
+    private static bool IsSheetLayoutOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
+        ops is { Count: > 0 } &&
+        ops.All(op => OperationValidator.ExcelSheetLayoutOpNames.Contains(Json.GetString(op, "op") ?? ""));
+
+    private static bool IsRenameOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
+        ops is { Count: > 0 } &&
+        ops.All(op => OperationValidator.ExcelRenameOpNames.Contains(Json.GetString(op, "op") ?? ""));
+
+    private static bool IsRangeEditOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
+        ops is { Count: > 0 } &&
+        ops.All(op => OperationValidator.ExcelRangeEditOpNames.Contains(Json.GetString(op, "op") ?? ""));
+
+    private static bool IsDeleteOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
+        ops is { Count: > 0 } &&
+        ops.All(op => OperationValidator.ExcelDeleteOpNames.Contains(Json.GetString(op, "op") ?? ""));
+
+    private static bool IsStructureOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
+        ops is { Count: > 0 } &&
+        ops.All(op => OperationValidator.ExcelStructureOpNames.Contains(Json.GetString(op, "op") ?? ""));
+
+    private static bool IsProtectOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
+        ops is { Count: > 0 } &&
+        ops.All(op => OperationValidator.ExcelProtectOpNames.Contains(Json.GetString(op, "op") ?? ""));
+
+    private static bool IsLifecycleOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
+        ops is { Count: > 0 } &&
+        ops.All(op => OperationValidator.ExcelLifecycleOpNames.Contains(Json.GetString(op, "op") ?? ""));
 
     private static bool IsFormatOnlySnapshot(IReadOnlyList<JsonObject>? ops) =>
         ops is { Count: > 0 } &&
@@ -217,13 +275,20 @@ public sealed partial class ExcelAdapter
         finally { RotHelper.ReleaseComReference(sheet); }
     }
 
+    private static int ResolveSheetVisibility(string? visibility) =>
+        string.Equals(visibility, "visible", StringComparison.OrdinalIgnoreCase) ? XlSheetVisible
+        : string.Equals(visibility, "veryHidden", StringComparison.OrdinalIgnoreCase) ? XlSheetVeryHidden
+        : string.Equals(visibility, "hidden", StringComparison.OrdinalIgnoreCase) ? XlSheetHidden
+        : throw new InvalidOperationException(
+            $"set_sheet_visibility visibility must be 'visible', 'hidden', or 'veryHidden'");
+
     private static void ValidateSheetVisibilityChange(object workbook, object sheet, int desired)
     {
         var current = Convert.ToInt32(((dynamic)sheet).Visible, CultureInfo.InvariantCulture);
         if (current == desired) return;
         if (Convert.ToBoolean(((dynamic)workbook).ProtectStructure, CultureInfo.InvariantCulture))
             throw new InvalidOperationException("[EXCEL_WORKBOOK_STRUCTURE_PROTECTED] workbook structure is protected");
-        if (desired != XlSheetHidden) return;
+        if (desired == XlSheetVisible) return;
 
         var sheetName = Convert.ToString(((dynamic)sheet).Name, CultureInfo.InvariantCulture) ?? "";
         if (string.Equals(sheetName, ReadActiveSheetName(workbook), StringComparison.OrdinalIgnoreCase))
@@ -267,16 +332,14 @@ public sealed partial class ExcelAdapter
                 errors.Add($"sheet '{sheetName}' not found");
                 continue;
             }
-            var desired = string.Equals(Json.GetString(op, "visibility"), "visible", StringComparison.OrdinalIgnoreCase)
-                ? XlSheetVisible
-                : XlSheetHidden;
+            var desired = ResolveSheetVisibility(Json.GetString(op, "visibility"));
             if (current == desired) continue;
             if (protectedStructure)
             {
                 errors.Add("[EXCEL_WORKBOOK_STRUCTURE_PROTECTED] workbook structure is protected");
                 continue;
             }
-            if (desired == XlSheetHidden)
+            if (desired is XlSheetHidden or XlSheetVeryHidden)
             {
                 if (string.Equals(sheetName, active, StringComparison.OrdinalIgnoreCase))
                 {
@@ -385,9 +448,7 @@ public sealed partial class ExcelAdapter
                 return;
             }
 
-            var desired = string.Equals(Json.GetString(op, "visibility"), "visible", StringComparison.OrdinalIgnoreCase)
-                ? XlSheetVisible
-                : XlSheetHidden;
+            var desired = ResolveSheetVisibility(Json.GetString(op, "visibility"));
             // ValidateVisibilityBatch has already checked the complete sequential sheet
             // transition. Reading the live workbook again here would make dry-run diffs
             // disagree with apply when two operations target the same sheet.
@@ -447,9 +508,7 @@ public sealed partial class ExcelAdapter
                 return;
             }
 
-            var desired = string.Equals(Json.GetString(op, "visibility"), "visible", StringComparison.OrdinalIgnoreCase)
-                ? XlSheetVisible
-                : XlSheetHidden;
+            var desired = ResolveSheetVisibility(Json.GetString(op, "visibility"));
             ValidateSheetVisibilityChange(workbook, sheet, desired);
             ((dynamic)sheet).Visible = desired;
             var actualVisibility = Convert.ToInt32(((dynamic)sheet).Visible, CultureInfo.InvariantCulture);
@@ -519,7 +578,86 @@ public sealed partial class ExcelAdapter
     }
 
     private static bool IsNonEmptyExcelValue(object? value) =>
-        value is not null && (value is not string text || text.Length != 0);
+        ExcelMergeEmptyStringContract.IsNonEmptyForMergeRefuse(value);
+
+    private sealed class ComMergeRangeSurface : ExcelMergeEmptyStringContract.IMergeRangeSurface
+    {
+        private readonly object _range;
+
+        public ComMergeRangeSurface(object range) => _range = range;
+
+        public bool Merged { get; private set; }
+
+        public int CellCount
+        {
+            get
+            {
+                object? cells = null;
+                try
+                {
+                    cells = (object)((dynamic)_range).Cells;
+                    return checked((int)Convert.ToInt64(((dynamic)cells).CountLarge, CultureInfo.InvariantCulture));
+                }
+                finally { RotHelper.ReleaseComReference(cells); }
+            }
+        }
+
+        public ExcelMergeEmptyStringContract.MergeCellSnapshot Read(int oneBasedIndex)
+        {
+            object? cells = null;
+            object? cell = null;
+            try
+            {
+                cells = (object)((dynamic)_range).Cells;
+                cell = (object)((dynamic)cells).Item(oneBasedIndex);
+                object? formula;
+                try { formula = ReadFormulaOrValue(cell); }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        $"Formula read failed at non-upper-left cell {oneBasedIndex}", ex);
+                }
+
+                object? value2;
+                try { value2 = ((dynamic)cell).Value2; }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        $"Value2 read failed at non-upper-left cell {oneBasedIndex}", ex);
+                }
+
+                return new ExcelMergeEmptyStringContract.MergeCellSnapshot(formula, value2, ReadFailed: false);
+            }
+            finally
+            {
+                RotHelper.ReleaseComReference(cell);
+                RotHelper.ReleaseComReference(cells);
+            }
+        }
+
+        public void ClearContents(int oneBasedIndex)
+        {
+            object? cells = null;
+            object? cell = null;
+            try
+            {
+                cells = (object)((dynamic)_range).Cells;
+                cell = (object)((dynamic)cells).Item(oneBasedIndex);
+                ((dynamic)cell).ClearContents();
+            }
+            finally
+            {
+                RotHelper.ReleaseComReference(cell);
+                RotHelper.ReleaseComReference(cells);
+            }
+        }
+
+        public void MergeAcross()
+        {
+            ((dynamic)_range).Merge(false);
+            Merged = true;
+        }
+    }
 
     private static void EnsureMergeWillNotDeleteContent(object range)
     {
@@ -720,7 +858,7 @@ public sealed partial class ExcelAdapter
                     try
                     {
                         range = (object)((dynamic)sheet).Range(plan.RequestedAddress);
-                        ((dynamic)range).Merge(false);
+                        ExcelMergeEmptyStringContract.PreclearThenMerge(new ComMergeRangeSurface(range));
                     }
                     finally { RotHelper.ReleaseComReference(range); }
                 }
@@ -849,6 +987,11 @@ public sealed partial class ExcelAdapter
                 throw new InvalidOperationException(
                     $"merge format snapshot exceeds {MaxFormatSnapshotCells} cells; write was blocked because cell formatting could not be restored safely");
 
+            // Range-level scalars when Excel reports no mixed values. A first-cell
+            // sample is never treated as the whole range; last-cell must confirm.
+            if (TryCaptureUniformMergeStyle(range, rows, columns) is JsonObject uniform)
+                return ExcelMergeSnapshotPerformance.EncodeUniformStyleRange(address, rows, columns, uniform);
+
             cells = (object)((dynamic)range).Cells;
             var styles = new JsonArray();
             for (var row = 1; row <= rows; row++)
@@ -866,7 +1009,7 @@ public sealed partial class ExcelAdapter
                 }
                 styles.Add(styleRow);
             }
-            return new JsonObject { ["range"] = address, ["styles"] = styles };
+            return ExcelMergeSnapshotPerformance.EncodeMixedStyleRange(address, rows, columns, styles);
         }
         finally
         {
@@ -877,6 +1020,270 @@ public sealed partial class ExcelAdapter
         }
     }
 
+    private static JsonObject? TryCaptureUniformMergeStyle(object range, int rows, int columns)
+    {
+        if (rows < 1 || columns < 1) return null;
+        if (rows == 1 && columns == 1)
+        {
+            try { return CaptureMergeCellStyle(range); }
+            catch { return null; }
+        }
+
+        if (!TryReadUnmixedMergeStyle(range, out var rangeStyle) || rangeStyle is null)
+            return null;
+
+        object? cells = null;
+        object? last = null;
+        try
+        {
+            cells = (object)((dynamic)range).Cells;
+            last = (object)((dynamic)cells).Item(rows, columns);
+            var lastStyle = CaptureMergeCellStyle(last);
+            if (!JsonNode.DeepEquals(rangeStyle, lastStyle))
+                return null;
+            // Color=0 is black or mixed. Last-cell equality does not prove A2 on A1:A3.
+            if (!TryConfirmEveryCellColors(range, rows, columns, rangeStyle))
+                return null;
+            return rangeStyle;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            RotHelper.ReleaseComReference(last);
+            RotHelper.ReleaseComReference(cells);
+        }
+    }
+
+    private static bool TryReadUnmixedMergeStyle(object range, out JsonObject? style)
+    {
+        style = null;
+        object? font = null;
+        object? interior = null;
+        try
+        {
+            dynamic dynamicRange = range;
+            font = (object)dynamicRange.Font;
+            interior = (object)dynamicRange.Interior;
+            dynamic dynamicFont = font;
+            dynamic dynamicInterior = interior;
+
+            object? bold = SafeGet(() => (object?)dynamicFont.Bold);
+            object? italic = SafeGet(() => (object?)dynamicFont.Italic);
+            object? fontName = SafeGet(() => (object?)dynamicFont.Name);
+            object? fontSize = SafeGet(() => (object?)dynamicFont.Size);
+            object? underline = SafeGet(() => (object?)dynamicFont.Underline);
+            object? strike = SafeGet(() => (object?)dynamicFont.Strikethrough);
+            object? numberFormat = SafeGet(() => (object?)dynamicRange.NumberFormat);
+            object? fontColor = SafeGet(() => (object?)dynamicFont.Color);
+            object? fillColor = SafeGet(() => (object?)dynamicInterior.Color);
+            object? fillPattern = SafeGet(() => (object?)dynamicInterior.Pattern);
+            object? fillPatternColor = SafeGet(() => (object?)dynamicInterior.PatternColor);
+            object? hAlign = SafeGet(() => (object?)dynamicRange.HorizontalAlignment);
+            object? vAlign = SafeGet(() => (object?)dynamicRange.VerticalAlignment);
+            object? wrap = SafeGet(() => (object?)dynamicRange.WrapText);
+            object? shrink = SafeGet(() => (object?)dynamicRange.ShrinkToFit);
+            object? indent = SafeGet(() => (object?)dynamicRange.IndentLevel);
+            object? orientation = SafeGet(() => (object?)dynamicRange.Orientation);
+            object? locked = SafeGet(() => (object?)dynamicRange.Locked);
+            object? hidden = SafeGet(() => (object?)dynamicRange.FormulaHidden);
+            if (IsMixed(bold) || IsMixed(italic) || IsMixed(fontName) || IsMixed(fontSize) ||
+                IsMixed(underline) || IsMixed(strike) || IsMixed(numberFormat) || IsMixed(fontColor) ||
+                IsMixed(fillColor) || IsMixed(fillPattern) || IsMixed(fillPatternColor) ||
+                IsMixed(hAlign) || IsMixed(vAlign) || IsMixed(wrap) || IsMixed(shrink) ||
+                IsMixed(indent) || IsMixed(orientation) || IsMixed(locked) || IsMixed(hidden) ||
+                numberFormat is Array)
+                return false;
+
+            if (!TryCaptureUnmixedBorders(range, out var borders) || borders is null)
+                return false;
+
+            style = new JsonObject
+            {
+                ["bold"] = Convert.ToBoolean(bold, CultureInfo.InvariantCulture),
+                ["italic"] = Convert.ToBoolean(italic, CultureInfo.InvariantCulture),
+                ["fontName"] = Convert.ToString(fontName, CultureInfo.InvariantCulture),
+                ["fontSize"] = Convert.ToDouble(fontSize, CultureInfo.InvariantCulture),
+                ["underline"] = Convert.ToInt32(underline, CultureInfo.InvariantCulture),
+                ["strikethrough"] = Convert.ToBoolean(strike, CultureInfo.InvariantCulture),
+                ["numberFormat"] = Convert.ToString(numberFormat, CultureInfo.InvariantCulture),
+                ["fontColor"] = Convert.ToDouble(fontColor, CultureInfo.InvariantCulture),
+                ["fillColor"] = Convert.ToDouble(fillColor, CultureInfo.InvariantCulture),
+                ["fillPattern"] = Convert.ToInt32(fillPattern, CultureInfo.InvariantCulture),
+                ["fillPatternColor"] = Convert.ToDouble(fillPatternColor, CultureInfo.InvariantCulture),
+                ["horizontalAlignment"] = Convert.ToInt32(hAlign, CultureInfo.InvariantCulture),
+                ["verticalAlignment"] = Convert.ToInt32(vAlign, CultureInfo.InvariantCulture),
+                ["wrapText"] = Convert.ToBoolean(wrap, CultureInfo.InvariantCulture),
+                ["shrinkToFit"] = Convert.ToBoolean(shrink, CultureInfo.InvariantCulture),
+                ["indentLevel"] = Convert.ToInt32(indent, CultureInfo.InvariantCulture),
+                ["orientation"] = Convert.ToInt32(orientation, CultureInfo.InvariantCulture),
+                ["locked"] = Convert.ToBoolean(locked, CultureInfo.InvariantCulture),
+                ["formulaHidden"] = Convert.ToBoolean(hidden, CultureInfo.InvariantCulture),
+                ["borders"] = borders,
+            };
+            return true;
+        }
+        catch
+        {
+            style = null;
+            return false;
+        }
+        finally
+        {
+            RotHelper.ReleaseComReference(interior);
+            RotHelper.ReleaseComReference(font);
+        }
+    }
+
+    private static bool TryConfirmEveryCellColors(object range, int rows, int columns, JsonObject style)
+    {
+        object? cells = null;
+        try
+        {
+            cells = (object)((dynamic)range).Cells;
+            var fontColors = new List<double>();
+            var fillColors = new List<double>();
+            var patternColors = new List<double>();
+            var borderColors = new Dictionary<int, List<double>>();
+            for (var row = 1; row <= rows; row++)
+            {
+                for (var column = 1; column <= columns; column++)
+                {
+                    object? cell = null;
+                    object? font = null;
+                    object? interior = null;
+                    try
+                    {
+                        cell = (object)((dynamic)cells).Item(row, column);
+                        font = (object)((dynamic)cell).Font;
+                        interior = (object)((dynamic)cell).Interior;
+                        fontColors.Add(Convert.ToDouble(((dynamic)font).Color, CultureInfo.InvariantCulture));
+                        fillColors.Add(Convert.ToDouble(((dynamic)interior).Color, CultureInfo.InvariantCulture));
+                        patternColors.Add(Convert.ToDouble(((dynamic)interior).PatternColor, CultureInfo.InvariantCulture));
+                        if (!TryReadCellBorderColors(cell, borderColors))
+                            return false;
+                    }
+                    finally
+                    {
+                        RotHelper.ReleaseComReference(interior);
+                        RotHelper.ReleaseComReference(font);
+                        RotHelper.ReleaseComReference(cell);
+                    }
+                }
+            }
+
+            if (!ExcelMergeSnapshotPerformance.CellColorsProveUniform(fontColors) ||
+                !ExcelMergeSnapshotPerformance.CellColorsProveUniform(fillColors) ||
+                !ExcelMergeSnapshotPerformance.CellColorsProveUniform(patternColors))
+                return false;
+            foreach (var sample in borderColors.Values)
+            {
+                if (!ExcelMergeSnapshotPerformance.CellColorsProveUniform(sample))
+                    return false;
+            }
+
+            style["fontColor"] = fontColors[0];
+            style["fillColor"] = fillColors[0];
+            style["fillPatternColor"] = patternColors[0];
+            if (style["borders"] is JsonArray borders)
+            {
+                foreach (var node in borders.OfType<JsonObject>())
+                {
+                    if (Json.GetInt(node, "index") is not int index) continue;
+                    if (!borderColors.TryGetValue(index, out var sample) || sample.Count == 0) return false;
+                    node["color"] = sample[0];
+                }
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+        finally { RotHelper.ReleaseComReference(cells); }
+    }
+
+    private static bool TryReadCellBorderColors(object cell, Dictionary<int, List<double>> colors)
+    {
+        object? bag = null;
+        try
+        {
+            bag = (object)((dynamic)cell).Borders;
+            foreach (var index in ExcelCellBorderIndexes)
+            {
+                object? border = null;
+                try
+                {
+                    border = (object)((dynamic)bag).Item(index);
+                    var color = Convert.ToDouble(((dynamic)border).Color, CultureInfo.InvariantCulture);
+                    if (!colors.TryGetValue(index, out var list))
+                    {
+                        list = new List<double>();
+                        colors[index] = list;
+                    }
+                    list.Add(color);
+                }
+                catch
+                {
+                    return false;
+                }
+                finally { RotHelper.ReleaseComReference(border); }
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+        finally { RotHelper.ReleaseComReference(bag); }
+    }
+
+    private static bool TryCaptureUnmixedBorders(object range, out JsonArray? borders)
+    {
+        borders = null;
+        object? borderBag = null;
+        try
+        {
+            borderBag = (object)((dynamic)range).Borders;
+            var result = new JsonArray();
+            foreach (var index in ExcelCellBorderIndexes)
+            {
+                object? border = null;
+                try
+                {
+                    border = (object)((dynamic)borderBag).Item(index);
+                    var line = SafeGet(() => (object?)((dynamic)border).LineStyle);
+                    var weight = SafeGet(() => (object?)((dynamic)border).Weight);
+                    var color = SafeGet(() => (object?)((dynamic)border).Color);
+                    if (IsMixed(line) || IsMixed(weight) || IsMixed(color))
+                        return false;
+                    result.Add(new JsonObject
+                    {
+                        ["index"] = index,
+                        ["lineStyle"] = Convert.ToInt32(line, CultureInfo.InvariantCulture),
+                        ["weight"] = Convert.ToInt32(weight, CultureInfo.InvariantCulture),
+                        ["color"] = Convert.ToDouble(color, CultureInfo.InvariantCulture),
+                    });
+                }
+                catch
+                {
+                    return false;
+                }
+                finally { RotHelper.ReleaseComReference(border); }
+            }
+            borders = result;
+            return true;
+        }
+        catch
+        {
+            borders = null;
+            return false;
+        }
+        finally { RotHelper.ReleaseComReference(borderBag); }
+    }
+
     private static int RestoreMergeStyleRanges(object sheet, string sheetName, JsonArray styleRanges,
         RestoreMismatchCollector mismatches)
     {
@@ -884,9 +1291,8 @@ public sealed partial class ExcelAdapter
         foreach (var node in styleRanges)
         {
             if (node is not JsonObject styleRange) continue;
-            var styleAddress = Json.GetString(styleRange, "range");
-            var styleRows = Json.GetArr(styleRange, "styles");
-            if (string.IsNullOrWhiteSpace(styleAddress) || styleRows is null)
+            if (!ExcelMergeSnapshotPerformance.TryReadStyleGrid(styleRange, out var styleAddress, out var styleRows) ||
+                string.IsNullOrWhiteSpace(styleAddress) || styleRows is null)
             {
                 mismatches.Add("merge style snapshot is missing range or styles");
                 continue;
@@ -897,6 +1303,21 @@ public sealed partial class ExcelAdapter
             try
             {
                 range = (object)((dynamic)sheet).Range(styleAddress);
+                if (ExcelMergeSnapshotPerformance.IsUniformCapture(styleRange) &&
+                    Json.GetObj(styleRange, "style") is JsonObject uniform)
+                {
+                    RestoreMergeCellStyle(range, uniform);
+                    var rows = Json.GetInt(styleRange, "rows") ?? styleRows.Count;
+                    var columns = Json.GetInt(styleRange, "columns") ??
+                                  (styleRows.Count > 0 && styleRows[0] is JsonArray first ? first.Count : 0);
+                    restoredCells += Math.Max(1, rows) * Math.Max(1, columns);
+                    if (!MergeCellStyleMatches(range, uniform))
+                    {
+                        mismatches.Add($"{sheetName}!{styleAddress}: uniform style restore mismatch");
+                    }
+                    continue;
+                }
+
                 cells = (object)((dynamic)range).Cells;
                 for (var row = 0; row < styleRows.Count; row++)
                 {
@@ -972,6 +1393,46 @@ public sealed partial class ExcelAdapter
             ["noOp"] = plan.NoOp,
             ["styleRanges"] = styleRanges,
         };
+    }
+
+    private static JsonObject CaptureMergeBatchState(object workbook, IReadOnlyList<JsonObject> ops, string? documentRef)
+    {
+        var entries = new JsonArray();
+        var totalCells = 0L;
+        foreach (var op in ops)
+        {
+            var entry = CaptureMergeState(workbook, op, documentRef);
+            entries.Add(entry);
+            var range = Json.GetString(entry, "range");
+            if (ExcelA1Box.TryParse(range, out var box))
+                totalCells += box.CellCount;
+        }
+
+        if (totalCells > MaxFormatSnapshotCells)
+            throw new InvalidOperationException(
+                $"merge batch snapshot exceeds {MaxFormatSnapshotCells} cells; write was blocked because cell formatting could not be restored safely");
+
+        var first = entries[0] as JsonObject ?? new JsonObject();
+        var state = new JsonObject
+        {
+            ["snapshotVersion"] = ExcelMergeBatchSnapshotVersion,
+            ["restoreMode"] = MergeRestoreMode,
+            ["documentRef"] = documentRef,
+            ["entries"] = entries,
+            ["rangeCount"] = entries.Count,
+            ["requestedCells"] = totalCells,
+        };
+
+        // v1 single-op envelope remains on one-op batches so older restore code can read them.
+        if (ops.Count == 1)
+        {
+            foreach (var key in new[] { "operation", "sheet", "range", "beforeMergedAreas", "anchorContent", "noOp", "styleRanges" })
+            {
+                if (first[key] is { } node) state[key] = node.DeepClone();
+            }
+        }
+
+        return state;
     }
 
     private static void SetIndividualHiddenStates(object sheet, bool rows, int start, JsonArray states,
@@ -1067,6 +1528,39 @@ public sealed partial class ExcelAdapter
     }
 
     private static JsonObject RestoreMergeState(object workbook, JsonObject state)
+    {
+        var version = Json.GetInt(state, "snapshotVersion") ?? ExcelLayoutSnapshotVersion;
+        if (version is not (ExcelLayoutSnapshotVersion or ExcelMergeBatchSnapshotVersion))
+        {
+            var invalid = new RestoreMismatchCollector();
+            invalid.Add("unsupported Excel merge snapshot version");
+            return BuildRestoreResult(false, 0, 0, MergeRestoreMode, invalid);
+        }
+
+        var entries = Json.GetArr(state, "entries");
+        if (entries is { Count: > 0 })
+        {
+            var batchMismatches = new RestoreMismatchCollector();
+            var restored = 0;
+            var checkedItems = 0;
+            for (var index = entries.Count - 1; index >= 0; index--)
+            {
+                if (entries[index] is not JsonObject entry) continue;
+                var one = RestoreOneMergeState(workbook, entry);
+                restored += Json.GetInt(one, "restoredCells") ?? 0;
+                checkedItems += Json.GetInt(Json.GetObj(one, "readback"), "checked") ?? 0;
+                foreach (var node in Json.GetArr(one, "mismatches") ?? new JsonArray())
+                    if (node is JsonValue value && value.TryGetValue<string>(out var text))
+                        batchMismatches.Add(text);
+            }
+
+            return BuildRestoreResult(batchMismatches.Count == 0, restored, checkedItems, MergeRestoreMode, batchMismatches);
+        }
+
+        return RestoreOneMergeState(workbook, state);
+    }
+
+    private static JsonObject RestoreOneMergeState(object workbook, JsonObject state)
     {
         var mismatches = new RestoreMismatchCollector();
         var operation = Json.GetString(state, "operation");
@@ -1208,6 +1702,10 @@ public sealed partial class ExcelAdapter
                 ["sheetVisibility"] = SheetVisibilityName(visibility),
                 ["rowStates"] = rowHidden,
                 ["columnStates"] = colHidden,
+                ["rowHeights"] = CaptureRowHeights(sheet, firstRow, limitedRows),
+                ["columnWidths"] = CaptureColumnWidths(sheet, firstColumn, limitedColumns),
+                ["freezePanes"] = CaptureFreezePanes(sheet),
+                ["pageSetup"] = CapturePageSetup(sheet),
                 ["mergedAreas"] = mergedAreas,
                 ["coverage"] = new JsonObject
                 {

@@ -33,7 +33,9 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
     private int _ownedProcessId;
     private ExcelOwnerWatchdog.Lease? _ownerWatchdog;
     private int _lifecycleTickRunning;
+    private int _comWorkInFlight;
     private int _excelDisposed;
+    private static string? _lastSnapshotDir;
 
     public ExcelAdapter(Func<object?>? appFactory = null, bool appFactoryOwnsInstance = false)
         : base("excel", "Excel.Application")
@@ -51,6 +53,15 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
     /// 팩토리가 주입된 경우 그 결과가 최종(fallback 없음) — 테스트 결정성 확보.</summary>
     private object? AttachExcel(bool allowCreate = false)
     {
+        // A user-pinned window wins over auto-selection on every call. Without a
+        // pin this method behaves exactly as before. Injected factories (tests)
+        // bypass pinning for determinism.
+        if (_appFactory is null)
+        {
+            var pin = ExcelInstancePin.TryLoadPin();
+            if (pin is not null)
+                return AttachPinnedExcel(pin);
+        }
         if (_attached is not null)
         {
             try
@@ -70,15 +81,18 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                 }
                 else
                 {
-                    var workbookCount = GetWorkbookCount(_attached);
+                    var workbookCount = TryGetWorkbookCount(_attached, out _);
                     if (workbookCount > 0) return _attached;
+                    if (workbookCount is null) return _attached;
 
                     // Closing the last workbook can leave EXCEL.EXE alive because this adapter
                     // still owns an RCW. If the user has already started a fresh Excel window,
                     // prefer that instance. Injected factories (tests/embedded hosts) create a
                     // replacement immediately. Production only creates a visible instance when
                     // an Excel operation actually needs one; status probing never launches Excel.
-                    var replacement = _appFactory is null ? FindPreferredRunningExcel(hwnd, requireWorkbook: true) : null;
+                    var replacement = _appFactory is null
+                        ? FindPreferredRunningExcel(hwnd, requireWorkbook: true, liveAlias: _attached)
+                        : null;
                     if (replacement is not null)
                     {
                         _ = DisconnectExcelCore("replaced-by-user-instance");
@@ -125,7 +139,154 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
         return _attached;
     }
 
-    private static object? FindPreferredRunningExcel(long excludedHwnd = 0, bool requireWorkbook = false)
+    /// <summary>
+    /// Create or reuse a DocBridge-owned Excel.Application. Never claims a user's
+    /// already-running instance as owned. Detaches a non-owned attachment first.
+    /// </summary>
+    private object? AttachDedicatedExcel()
+    {
+        if (_attached is not null && _ownsInstance)
+        {
+            try
+            {
+                dynamic current = _attached;
+                _ = Convert.ToInt64(current.Hwnd, CultureInfo.InvariantCulture);
+                return _attached;
+            }
+            catch (Exception ex) when (IsComDisconnected(ex))
+            {
+                DetachExcelReference();
+            }
+        }
+        else if (_attached is not null)
+        {
+            DetachExcelReference();
+        }
+
+        return CreateDedicatedExcel();
+    }
+
+    private object? CreateDedicatedExcel()
+    {
+        if (_appFactory is not null)
+        {
+            _attached = _appFactory();
+            _ownsInstance = _attached is not null && _appFactoryOwnsInstance;
+            if (_ownsInstance)
+            {
+                MakeOwnedInstanceVisible(_attached!);
+                _ownedProcessId = ReadApplicationProcessId(_attached!);
+                _ownerWatchdog = ExcelOwnerWatchdog.Start(_ownedProcessId);
+            }
+            return _attached;
+        }
+
+        _attached = RotHelper.CreateInstance("Excel.Application");
+        _ownsInstance = _attached is not null;
+        if (_attached is not null)
+        {
+            MakeOwnedInstanceVisible(_attached);
+            _ownedProcessId = ReadApplicationProcessId(_attached!);
+            _ownerWatchdog = ExcelOwnerWatchdog.Start(_ownedProcessId);
+        }
+
+        return _attached;
+    }
+
+    /// <summary>
+    /// Attach exclusively to the pinned user window. A stale pin fails closed
+    /// with an actionable error instead of silently using another instance.
+    /// </summary>
+    private object? AttachPinnedExcel(ExcelInstancePin.PinState pin)
+    {
+        if (_attached is not null && !AttachedMatchesPin(_attached, pin))
+            DetachExcelReference();
+        if (_attached is not null)
+        {
+            try
+            {
+                dynamic current = _attached;
+                var hwnd = Convert.ToInt64(current.Hwnd, CultureInfo.InvariantCulture);
+                if (RotHelper.IsWindowAlive(hwnd) && AttachedMatchesPin(_attached, pin))
+                    return _attached;
+            }
+            catch (Exception ex) when (IsComDisconnected(ex))
+            {
+            }
+            DetachExcelReference();
+        }
+        var found = FindPinnedExcel(pin);
+        if (found is null)
+            throw new InvalidOperationException(
+                $"[EXCEL_PINNED_INSTANCE_GONE] pinned Excel (processId {pin.ProcessId}, hwnd {pin.Hwnd}) " +
+                "is not running; reopen Excel and pin the window again with excel_launch, " +
+                "or unpin with excel_launch clearPin");
+        _attached = found;
+        _ownsInstance = false;
+        _ownedProcessId = pin.ProcessId;
+        return _attached;
+    }
+
+    private static bool AttachedMatchesPin(object attached, ExcelInstancePin.PinState pin)
+    {
+        try
+        {
+            var hwnd = Convert.ToInt64(((dynamic)attached).Hwnd, CultureInfo.InvariantCulture);
+            if (hwnd == pin.Hwnd &&
+                RotHelper.ProcessIdFromWindowHandle(hwnd) == pin.ProcessId)
+                return true;
+            // Excel recreates its top window (new HWND, same process). Heal the
+            // pin only when the process identity provably matches; otherwise the
+            // PID may have been recycled and the pin stays stale (fail closed).
+            if (RotHelper.ProcessIdFromWindowHandle(hwnd) != pin.ProcessId)
+                return false;
+            var started = ExcelInstancePin.ProcessStartTimestamp(pin.ProcessId);
+            if (string.IsNullOrWhiteSpace(pin.ProcessStartUtc) || started != pin.ProcessStartUtc)
+                return false;
+            return ExcelInstancePin.TrySavePin(pin.ProcessId, hwnd, "heal", out string? healError);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static object? FindPinnedExcel(ExcelInstancePin.PinState pin)
+    {
+        // _attached is always detached before this runs, so there is no live
+        // alias to preserve; still use the discovery release discipline.
+        foreach (var candidate in RotHelper.GetExcelApplications())
+        {
+            var keep = false;
+            try
+            {
+                var hwnd = Convert.ToInt64(((dynamic)candidate).Hwnd, CultureInfo.InvariantCulture);
+                if (RotHelper.ProcessIdFromWindowHandle(hwnd) != pin.ProcessId) continue;
+                if (hwnd != pin.Hwnd)
+                {
+                    var started = ExcelInstancePin.ProcessStartTimestamp(pin.ProcessId);
+                    if (string.IsNullOrWhiteSpace(pin.ProcessStartUtc) || started != pin.ProcessStartUtc)
+                        continue;
+                    if (!ExcelInstancePin.TrySavePin(pin.ProcessId, hwnd, "heal", out string? healError))
+                        continue;
+                }
+                if (!RotHelper.IsWindowAlive(hwnd)) continue;
+                keep = true;
+                return candidate;
+            }
+            catch
+            {
+                // Unreadable candidates are never the pinned window.
+            }
+            finally
+            {
+                if (!keep) RotHelper.ReleaseDiscoveredApplication(candidate, null);
+            }
+        }
+        return null;
+    }
+
+    private static object? FindPreferredRunningExcel(long excludedHwnd = 0, bool requireWorkbook = false, object? liveAlias = null)
     {
         object? selected = null;
         var selectedScore = int.MinValue;
@@ -134,29 +295,44 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             var keep = false;
             try
             {
+                if (ExcelComAliasContract.MustPreserveLiveAlias(candidate, liveAlias))
+                    continue;
                 dynamic app = candidate;
                 var hwnd = Convert.ToInt64(app.Hwnd, CultureInfo.InvariantCulture);
                 if (hwnd == excludedHwnd || !RotHelper.IsWindowAlive(hwnd)) continue;
-                var workbookCount = GetWorkbookCount(candidate);
-                if (requireWorkbook && workbookCount == 0) continue;
+                var workbookCount = TryGetWorkbookCount(candidate, out _);
+                var readFailed = workbookCount is null;
+                if (requireWorkbook && ExcelDiscoveryCoverageContract.SkipWhenRequireWorkbook(workbookCount, readFailed))
+                    continue;
 
                 // A visible instance with a real workbook is a user session. Prefer it over a
-                // zero-workbook automation remnant returned by the ProgID fallback.
-                var score = workbookCount > 0 ? 1000 + workbookCount : 1;
+                // zero-workbook automation remnant. Busy/rejected coverage is unknown, not empty.
+                var score = ExcelDiscoveryCoverageContract.DiscoveryScore(workbookCount, readFailed);
                 if (score <= selectedScore) continue;
-                if (selected is not null) RotHelper.ReleaseComObject(selected);
+                if (selected is not null)
+                    RotHelper.ReleaseDiscoveredApplication(selected, liveAlias);
                 selected = candidate;
                 selectedScore = score;
                 keep = true;
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore Excel instances that are closing, busy, or no longer connected.
+                // Busy/rejected is unknown coverage, not an empty remnant. Keep the
+                // RCW so a later proven-empty PID is not preferred over the modal instance.
+                if (ExcelDiscoveryCoverageContract.IsBusyOrRejected(ex) &&
+                    ExcelDiscoveryCoverageContract.ShouldRetainBusyCandidate(selectedScore))
+                {
+                    if (selected is not null)
+                        RotHelper.ReleaseDiscoveredApplication(selected, liveAlias);
+                    selected = candidate;
+                    selectedScore = ExcelDiscoveryCoverageContract.DiscoveryScore(null, true);
+                    keep = true;
+                }
             }
             finally
             {
-                if (!keep && !ReferenceEquals(candidate, selected))
-                    RotHelper.ReleaseComObject(candidate);
+                if (!keep)
+                    RotHelper.ReleaseDiscoveredApplication(candidate, liveAlias);
             }
         }
         return selected;
@@ -173,7 +349,21 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
         }
         finally
         {
-            RotHelper.ReleaseComObject(workbooks);
+            RotHelper.ReleaseComReference(workbooks);
+        }
+    }
+
+    private static int? TryGetWorkbookCount(object application, out string? failure)
+    {
+        failure = null;
+        try
+        {
+            return GetWorkbookCount(application);
+        }
+        catch (Exception ex) when (!IsComDisconnected(ex))
+        {
+            failure = ExcelDiscoveryCoverageContract.DescribeFailure(ex);
+            return null;
         }
     }
 
@@ -239,7 +429,7 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
         if (!_ownsInstance || _attached is null) return;
         try
         {
-            if (GetWorkbookCount(_attached) == 0)
+            if (TryGetWorkbookCount(_attached, out _) == 0)
                 _ = DisconnectExcelCore(reason);
         }
         catch (Exception ex) when (IsComDisconnected(ex))
@@ -280,13 +470,13 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                 }
                 finally
                 {
-                    RotHelper.ReleaseComObject(workbook);
+                    RotHelper.ReleaseComReference(workbook);
                 }
             }
         }
         finally
         {
-            RotHelper.ReleaseComObject(workbooks);
+            RotHelper.ReleaseComReference(workbooks);
         }
         return unsaved;
     }
@@ -307,6 +497,13 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
         var warnings = new List<string>();
         if (attached is not null && owned)
         {
+            int? workbookCount = null;
+            try { workbookCount = GetWorkbookCount(attached); }
+            catch (Exception ex)
+            {
+                warnings.Add($"Excel workbook count could not be verified: {ex.Message}");
+            }
+
             try { unsaved = ReadUnsavedWorkbookNames(attached); }
             catch (Exception ex)
             {
@@ -314,7 +511,7 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                 warnings.Add($"Excel 저장 상태 확인 실패: {ex.Message}");
             }
 
-            if (unsaved.Count == 0)
+            if (ExcelApplicationQuitContract.MayAutoQuit(ownedInstance: true, workbookCount))
             {
                 try
                 {
@@ -328,14 +525,14 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             }
             else
             {
-                warnings.Add("저장되지 않은 통합문서가 있어 Excel을 종료하지 않고 COM 연결만 해제했습니다.");
+                warnings.Add(ExcelApplicationQuitContract.DetachWithoutQuitMessage(workbookCount));
             }
         }
 
         RotHelper.ReleaseComObject(attached);
         ForceComReferenceCleanup();
-        // Signal only after this process has released its root RCW. On a clean Quit the watchdog
-        // holds the final COM reference, then releases it; on an unsaved workbook it only detaches.
+        // Signal only after this process has released its root RCW. On a clean empty Quit the
+        // watchdog holds the final COM reference, then releases it; a nonempty collection only detaches.
         ownerWatchdog?.Dispose();
         if (quitCalled && ownedProcessId > 0 && !WaitForProcessExit(ownedProcessId, TimeSpan.FromSeconds(10)))
             warnings.Add($"DocBridge 소유 Excel PID {ownedProcessId}가 정상 종료 대기 시간 안에 끝나지 않았습니다. 강제 종료하지 않았습니다.");
@@ -378,6 +575,7 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
     private void RunIdleLifecycleCheck()
     {
         if (Volatile.Read(ref _excelDisposed) != 0 ||
+            Volatile.Read(ref _comWorkInFlight) != 0 ||
             Interlocked.Exchange(ref _lifecycleTickRunning, 1) != 0)
             return;
         try
@@ -389,7 +587,7 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                 {
                     // Once the user closes the last workbook/window, keeping our RCW is the exact
                     // condition that creates the add-in-less EXCEL.EXE remnant.
-                    if (GetWorkbookCount(_attached) == 0)
+                    if (TryGetWorkbookCount(_attached, out _) == 0)
                         _ = DisconnectExcelCore("last-workbook-closed");
                 }
                 catch (Exception ex) when (IsComDisconnected(ex))
@@ -510,11 +708,8 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
         var applications = new List<(object Application, bool ReleaseWhenDone)> { (attachedApplication, false) };
         foreach (var candidate in RotHelper.GetExcelApplications())
         {
-            if (ReferenceEquals(candidate, attachedApplication))
-            {
-                RotHelper.ReleaseComReference(candidate);
+            if (ExcelComAliasContract.MustPreserveLiveAlias(candidate, attachedApplication))
                 continue;
-            }
             applications.Add((candidate, true));
         }
         var seenApps = new HashSet<long>();
@@ -553,7 +748,7 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                     }
                     finally
                     {
-                        if (!matched) RotHelper.ReleaseComObject(workbook);
+                        if (!matched) RotHelper.ReleaseComReference(workbook);
                     }
                 }
             }
@@ -563,9 +758,9 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             }
             finally
             {
-                RotHelper.ReleaseComObject(workbooks);
+                RotHelper.ReleaseComReference(workbooks);
                 if (candidate.ReleaseWhenDone && !applicationTransferred)
-                    RotHelper.ReleaseComObject(candidate.Application);
+                    RotHelper.ReleaseDiscoveredApplication(candidate.Application, attachedApplication);
             }
         }
 
@@ -581,7 +776,7 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                     object workbook = ((dynamic)workbooks).Open(reference, 0, true);
                     return new OpenWorkbook(attachedApplication, workbook, closeWhenDone: true);
                 }
-                finally { RotHelper.ReleaseComObject(workbooks); }
+                finally { RotHelper.ReleaseComReference(workbooks); }
             }
             catch (Exception ex)
             {
@@ -660,11 +855,20 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
     };
 
     /// <summary>Range.Value2를 2차원 JsonArray로 (상한 적용). dynamic 전염 방지를 위해 object로 받는다.</summary>
-    private static JsonArray RangeToJson(object rangeObj, out int cellCount, bool formulas = false, int maxCells = MaxCells)
+    private static JsonArray RangeToJson(object rangeObj, out int cellCount, bool formulas = false, int maxCells = MaxCells, bool formula2 = false)
     {
         dynamic range = rangeObj;
         cellCount = 0;
-        object? raw = formulas ? range.Formula : range.Value2;
+        object? raw;
+        if (formula2)
+        {
+            try { raw = range.Formula2; }
+            catch { raw = formulas ? range.Formula : range.Value2; }
+        }
+        else
+        {
+            raw = formulas ? range.Formula : range.Value2;
+        }
         var rows = new JsonArray();
         if (raw is object[,] arr)
         {
@@ -687,6 +891,48 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
         {
             rows.Add(new JsonArray { ToJsonValue(raw) });
             cellCount = 1;
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Serializes an already bounded public-read page. Formula2 is deliberately
+    /// strict: a caller that requested its dynamic-array semantics receives its
+    /// COM failure rather than a silent Formula fallback.
+    /// </summary>
+    private static JsonArray ReadBoundedRangePage(
+        object rangeObj,
+        int maxCells,
+        bool formulas = false,
+        ExcelRangeReadContract.FormulaMode formulaMode = ExcelRangeReadContract.FormulaMode.Formula)
+    {
+        dynamic range = rangeObj;
+        object? raw = formulas
+            ? formulaMode == ExcelRangeReadContract.FormulaMode.Formula2 ? range.Formula2 : range.Formula
+            : range.Value2;
+        var rows = new JsonArray();
+        var cellCount = 0;
+        if (raw is object[,] arr)
+        {
+            var r1 = arr.GetLowerBound(0); var r2 = arr.GetUpperBound(0);
+            var c1 = arr.GetLowerBound(1); var c2 = arr.GetUpperBound(1);
+            for (var r = r1; r <= r2; r++)
+            {
+                var row = new JsonArray();
+                for (var c = c1; c <= c2; c++)
+                {
+                    if (cellCount >= maxCells)
+                        throw new InvalidOperationException("bounded Excel page exceeded its cell cap");
+                    row.Add(ToJsonValue(arr[r, c]));
+                    cellCount++;
+                }
+                rows.Add(row);
+            }
+        }
+        else
+        {
+            if (maxCells < 1) throw new InvalidOperationException("bounded Excel page has no cell capacity");
+            rows.Add(new JsonArray { ToJsonValue(raw) });
         }
         return rows;
     }
@@ -861,30 +1107,74 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                     dynamic sheet = sheetObject;
                     var rangeAddr = resolvedRange.Address;
                     rangeObject = (object)sheet.Range(rangeAddr);
-                    dynamic range = rangeObject;
-
                     var includeFormulas = Json.GetBool(args, "includeFormulas");
                     var includeStyles = Json.GetBool(args, "includeStyles");
                     var includeLayout = Json.GetBool(args, "includeLayout");
-
-                    var result = new JsonObject
+                    var formulaMode = includeFormulas
+                        ? ExcelRangeReadContract.ResolveFormulaMode(args)
+                        : ExcelRangeReadContract.FormulaMode.Formula;
+                    object? areasObject = null;
+                    object? firstCellObject = null;
+                    object? pageRangeObject = null;
+                    try
                     {
-                        ["ok"] = true,
-                        ["app"] = App,
-                        ["workbook"] = (string)wb.FullName,
-                        ["sheet"] = (string)sheet.Name,
-                        ["range"] = rangeAddr,
-                        ["values"] = RangeToJson(rangeObject, out var cells),
-                    };
-                    long totalCells;
-                    try { totalCells = Convert.ToInt64(range.CountLarge, CultureInfo.InvariantCulture); }
-                    catch { totalCells = Convert.ToInt64(range.Count, CultureInfo.InvariantCulture); }
-                    result["truncated"] = totalCells > cells;
-                    if (includeFormulas) result["formulas"] = RangeToJson(rangeObject, out _, formulas: true);
-                    if (includeStyles)
-                        result["styles"] = ExcelStyleContract.WithReadAliases(CaptureRangeStyleSummary(rangeObject));
-                    if (includeLayout) result["layout"] = ReadRangeLayout(sheetObject, rangeObject);
-                    return result;
+                        dynamic range = rangeObject;
+                        areasObject = (object)range.Areas;
+                        var areaCount = Convert.ToInt32(((dynamic)areasObject).Count, CultureInfo.InvariantCulture);
+                        if (areaCount != 1)
+                            return Json.ErrorResult("excel_read_range does not support multi-area ranges; request one contiguous area", App);
+
+                        var totalRows = Convert.ToInt32(range.Rows.Count, CultureInfo.InvariantCulture);
+                        var totalColumns = Convert.ToInt32(range.Columns.Count, CultureInfo.InvariantCulture);
+                        var page = ExcelRangeReadContract.Plan(args, totalRows, totalColumns, MaxCells);
+                        firstCellObject = (object)range.Cells.Item(page.RowOffset + 1, page.ColumnOffset + 1);
+                        pageRangeObject = (object)((dynamic)firstCellObject).Resize(page.Rows, page.Columns);
+                        dynamic pageRange = pageRangeObject;
+                        var returnedRange = (string)pageRange.Address(false, false);
+
+                        var result = new JsonObject
+                        {
+                            ["ok"] = true,
+                            ["app"] = App,
+                            ["workbook"] = (string)wb.FullName,
+                            ["sheet"] = (string)sheet.Name,
+                            // Preserve the old field as the requested range for compatibility.
+                            ["range"] = rangeAddr,
+                            ["requestedRange"] = rangeAddr,
+                            ["returnedRange"] = returnedRange,
+                            ["values"] = ReadBoundedRangePage(pageRangeObject, page.Cells),
+                            ["coverage"] = new JsonObject
+                            {
+                                ["requestedRows"] = page.TotalRows,
+                                ["requestedColumns"] = page.TotalColumns,
+                                ["requestedCells"] = (long)page.TotalRows * page.TotalColumns,
+                                ["returnedRows"] = page.Rows,
+                                ["returnedColumns"] = page.Columns,
+                                ["returnedCells"] = page.Cells,
+                                ["rowOffset"] = page.RowOffset,
+                                ["columnOffset"] = page.ColumnOffset,
+                                ["complete"] = page.Complete,
+                                ["hasMore"] = page.HasMore,
+                                ["continuation"] = page.Continuation,
+                            },
+                            ["truncated"] = !page.Complete,
+                        };
+                        if (includeFormulas)
+                        {
+                            result["formulaMode"] = formulaMode == ExcelRangeReadContract.FormulaMode.Formula2 ? "formula2" : "formula";
+                            result["formulas"] = ReadBoundedRangePage(pageRangeObject, page.Cells, formulas: true, formulaMode: formulaMode);
+                        }
+                        if (includeStyles)
+                            result["styles"] = ExcelStyleContract.WithReadAliases(CaptureRangeStyleSummary(pageRangeObject));
+                        if (includeLayout) result["layout"] = ReadRangeLayout(sheetObject, pageRangeObject);
+                        return result;
+                    }
+                    finally
+                    {
+                        RotHelper.ReleaseComReference(pageRangeObject);
+                        RotHelper.ReleaseComReference(firstCellObject);
+                        RotHelper.ReleaseComReference(areasObject);
+                    }
                 }
                 finally
                 {
@@ -915,11 +1205,8 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
         var applications = new List<(object Application, bool ReleaseWhenDone)> { (attachedApplication, false) };
         foreach (var candidate in RotHelper.GetExcelApplications())
         {
-            if (ReferenceEquals(candidate, attachedApplication))
-            {
-                RotHelper.ReleaseComReference(candidate);
+            if (ExcelComAliasContract.MustPreserveLiveAlias(candidate, attachedApplication))
                 continue;
-            }
             applications.Add((candidate, true));
         }
         var seenApps = new HashSet<long>();
@@ -927,11 +1214,14 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
         {
             object? activeWorkbook = null;
             object? workbooks = null;
+            var hwnd = 0L;
+            var processId = 0;
             try
             {
                 var appObj = candidate.Application;
                 dynamic app = appObj;
-                var hwnd = Convert.ToInt64(app.Hwnd, CultureInfo.InvariantCulture);
+                hwnd = Convert.ToInt64(app.Hwnd, CultureInfo.InvariantCulture);
+                processId = RotHelper.ProcessIdFromWindowHandle(hwnd);
                 if (!seenApps.Add(hwnd)) continue;
                 var activeName = "";
                 try
@@ -967,6 +1257,7 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                         result.Add(new JsonObject
                         {
                             ["excelHwnd"] = hwnd,
+                            ["processId"] = processId,
                             ["name"] = workbookName,
                             ["fullName"] = Convert.ToString(((dynamic)workbook).FullName, CultureInfo.InvariantCulture),
                             ["activeInInstance"] = string.Equals(activeName, workbookName, StringComparison.OrdinalIgnoreCase),
@@ -976,20 +1267,23 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                     }
                     finally
                     {
-                        RotHelper.ReleaseComObject(worksheets);
+                        RotHelper.ReleaseComReference(worksheets);
                         RotHelper.ReleaseComReference(workbook);
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // 닫히는 중이거나 모달 상태인 인스턴스는 목록에서 생략한다.
+                if (hwnd != 0)
+                    result.Add(ExcelDiscoveryCoverageContract.UnknownInstance(
+                        hwnd, processId, ExcelDiscoveryCoverageContract.DescribeFailure(ex)));
             }
             finally
             {
-                RotHelper.ReleaseComObject(workbooks);
+                RotHelper.ReleaseComReference(workbooks);
                 RotHelper.ReleaseComReference(activeWorkbook);
-                if (candidate.ReleaseWhenDone) RotHelper.ReleaseComObject(candidate.Application);
+                if (candidate.ReleaseWhenDone)
+                    RotHelper.ReleaseDiscoveredApplication(candidate.Application, attachedApplication);
             }
         }
         return result;
@@ -1001,13 +1295,33 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
     {
         return ComInvoke(() =>
         {
+            Interlocked.Increment(ref _comWorkInFlight);
+            try
+            {
             var p = new ApplyPreview();
             var interaction = new ForegroundInteractionGuard(App);
             try
             {
+                var createOnly = IsCreateOrOpenOnly(ops) &&
+                                 string.Equals(Json.GetString(ops[0], "op"), "create_workbook", StringComparison.OrdinalIgnoreCase);
+                if (createOnly)
+                {
+                    foreach (var op in ops)
+                        PreviewLifecycleOperation(null!, null, op, p);
+                    return p;
+                }
+
                 var app = AttachExcel();
                 if (app is null) { p.Errors.Add("Excel not running"); return p; }
                 dynamic d = app;
+                if (IsCreateOrOpenOnly(ops))
+                {
+                    try { interaction.TrackTargetWindow(Convert.ToInt64(d.Hwnd, CultureInfo.InvariantCulture)); } catch { }
+                    foreach (var op in ops)
+                        PreviewLifecycleOperation((object)d, null, op, p);
+                    return p;
+                }
+
                 using var workbookLease = ResolveTargetWorkbook(d, RequireWorkbook(d), ops);
                 dynamic wb = workbookLease.Workbook;
                 try { interaction.TrackTargetWindow(Convert.ToInt64(wb.Application.Hwnd, CultureInfo.InvariantCulture)); }
@@ -1068,6 +1382,9 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                                     Before = ExcelStyleContract.WithReadAliases(CaptureRangeStyleSummary(rangeObject)),
                                     After = style.DeepClone(),
                                 });
+                                WarnBorderClearNeighbors((object)sheet,
+                                    Convert.ToString(sheet.Name, CultureInfo.InvariantCulture) ?? "",
+                                    rangeAddr, Json.GetObj(style, "borders"), p);
                             }
                             finally { RotHelper.ReleaseComReference(rangeObject); }
                             break;
@@ -1085,6 +1402,34 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                                 visibilityPreviewState ?? throw new InvalidOperationException(
                                     "visibility preview state was not initialized"));
                             break;
+                        case "set_row_heights":
+                        case "set_column_widths":
+                        case "freeze_panes":
+                        case "set_page_setup":
+                        case "set_view":
+                            PreviewSheetLayoutOperation((object)wb, op, p);
+                            break;
+                        case "rename_sheet":
+                        case "clear_range":
+                        case "copy_range":
+                        case "delete_rows":
+                        case "delete_cols":
+                        case "add_sheet":
+                        case "move_sheet":
+                        case "protect_sheet":
+                        case "unprotect_sheet":
+                            PreviewRangeSheetOperation((object)wb, op, p);
+                            break;
+                        case "save_workbook":
+                        case "export_pdf":
+                        case "close_workbook":
+                            PreviewLifecycleOperation((object)d, (object)wb, op, p);
+                            break;
+                        default:
+                            if (!TryPreviewExtendedOperation((object)wb, op, p) &&
+                                !TryPreviewDataOperation((object)wb, op, p))
+                                p.Errors.Add($"unsupported Excel preview op '{name}'");
+                            break;
                     }
                     if (!interaction.Checkpoint(stopOnConcurrentInput: true))
                     {
@@ -1096,6 +1441,8 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             catch (Exception ex) { p.Errors.Add($"preview failed: {ex.Message}"); }
             finally { p.Interaction = interaction.Complete(); }
             return p;
+            }
+            finally { Interlocked.Decrement(ref _comWorkInFlight); }
         });
     }
 
@@ -1257,6 +1604,9 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
     {
         return ComInvoke(() =>
         {
+            Interlocked.Increment(ref _comWorkInFlight);
+            try
+            {
             var exec = new ApplyExecution { Ok = true };
             var mismatches = new List<string>();
             var checkedCells = 0;
@@ -1268,9 +1618,32 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             var originalStateRestored = true;
             try
             {
-                var app = AttachExcel();
+                var allowCreate = IsCreateOrOpenOnly(ops) &&
+                                  string.Equals(Json.GetString(ops[0], "op"), "create_workbook", StringComparison.OrdinalIgnoreCase);
+                var app = AttachExcel(allowCreate);
                 if (app is null) { exec.Errors.Add("Excel not running"); exec.Ok = false; return exec; }
                 dynamic d = app;
+                if (IsCreateOrOpenOnly(ops))
+                {
+                    try { interaction.TrackTargetWindow(Convert.ToInt64(d.Hwnd, CultureInfo.InvariantCulture)); } catch { }
+                    var createMismatches = new List<string>();
+                    ApplyLifecycleOperation((object)d, null, ops[0], exec, createMismatches, ref checkedCells);
+                    mismatches.AddRange(createMismatches);
+                    exec.Readback = new JsonObject
+                    {
+                        ["verified"] = createMismatches.Count == 0 && exec.Errors.Count == 0,
+                        ["checked"] = checkedCells,
+                        ["mismatches"] = Json.ToArray(createMismatches),
+                        ["snapshotId"] = snapshotId,
+                    };
+                    if (createMismatches.Count > 0)
+                    {
+                        exec.Ok = false;
+                        if (exec.Errors.Count == 0) exec.Errors.AddRange(createMismatches);
+                    }
+                    return exec;
+                }
+
                 using var workbookLease = ResolveTargetWorkbook(d, RequireWorkbook(d), ops);
                 dynamic wb = workbookLease.Workbook;
                 targetApplication = wb.Application;
@@ -1337,6 +1710,34 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                                 case "set_sheet_visibility":
                                     ApplyVisibilityOperation((object)wb, op, exec, opMismatches, ref checkedCells);
                                     break;
+                                case "set_row_heights":
+                                case "set_column_widths":
+                                case "freeze_panes":
+                                case "set_page_setup":
+                                case "set_view":
+                                    ApplySheetLayoutOperation((object)wb, op, exec, opMismatches, ref checkedCells);
+                                    break;
+                                case "rename_sheet":
+                                case "clear_range":
+                                case "copy_range":
+                                case "delete_rows":
+                                case "delete_cols":
+                                case "add_sheet":
+                                case "move_sheet":
+                                case "protect_sheet":
+                                case "unprotect_sheet":
+                                    ApplyRangeSheetOperation((object)wb, op, exec, opMismatches, ref checkedCells);
+                                    break;
+                                case "save_workbook":
+                                case "export_pdf":
+                                case "close_workbook":
+                                    ApplyLifecycleOperation((object)targetApplication, (object)wb, op, exec, opMismatches, ref checkedCells);
+                                    break;
+                                default:
+                                    if (!TryApplyExtendedOperation((object)wb, op, exec, opMismatches, ref checkedCells) &&
+                                        !TryApplyDataOperation((object)wb, op, exec, opMismatches, ref checkedCells))
+                                        throw new InvalidOperationException($"unsupported Excel apply op '{name}'");
+                                    break;
                             }
 
                             mismatches.AddRange(opMismatches);
@@ -1377,6 +1778,8 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                     ["mismatches"] = Json.ToArray(mismatches),
                     ["snapshotId"] = snapshotId,
                 };
+                if (exec.Formula2Readbacks.Count > 0)
+                    exec.Readback["formula2"] = exec.Formula2Readbacks.DeepClone();
                 if (mismatches.Count > 0)
                 {
                     exec.Ok = false;
@@ -1435,6 +1838,8 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                 exec.Interaction = telemetry;
             }
             return exec;
+            }
+            finally { Interlocked.Decrement(ref _comWorkInFlight); }
         });
     }
 
@@ -1448,37 +1853,282 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             Json.GetString(Json.GetObj(op, "target"), "sheet"),
             rangeReference,
             requireExplicitSheet: true);
-        dynamic sheet = resolvedRange.Sheet;
+        object? sheet = resolvedRange.Sheet;
+        object? range = null;
         var rangeAddr = resolvedRange.Address;
-        dynamic range = sheet.Range(rangeAddr);
-
-        var rows = values.Count;
-        var cols = values[0] is JsonArray ja0 ? ja0.Count : 1;
-        var data = new object?[rows, cols];
-        for (var i = 0; i < rows; i++)
+        try
         {
-            if (values[i] is not JsonArray rowArr) continue;
-            for (var j = 0; j < rowArr.Count; j++)
+            range = (object)((dynamic)sheet).Range(rangeAddr);
+            var rows = values.Count;
+            var cols = values[0] is JsonArray ja0 ? ja0.Count : 1;
+            var writes = new ExcelValueWriteContract.CellWrite[rows, cols];
+            var data = new object?[rows, cols];
+            for (var i = 0; i < rows; i++)
             {
-                data[i, j] = NodeToComValue(rowArr[j]);
+                if (values[i] is not JsonArray rowArr) continue;
+                for (var j = 0; j < rowArr.Count; j++)
+                {
+                    writes[i, j] = ExcelValueWriteContract.Classify(rowArr[j]);
+                    data[i, j] = formulas
+                        ? NodeToComValue(rowArr[j])
+                        : writes[i, j].Kind is ExcelValueWriteContract.JsonKind.String
+                            or ExcelValueWriteContract.JsonKind.EmptyString
+                            ? null
+                            : writes[i, j].ComValue;
+                }
+            }
+
+            var formulaEngine = formulas ? ExcelFormula2Contract.ResolveEngine(op) : null;
+            if (formulas && formulaEngine == ExcelFormula2Contract.EngineFormula2)
+                ((dynamic)range).Formula2 = data;
+            else if (formulas)
+                ((dynamic)range).Formula = data;
+            else
+            {
+                ((dynamic)range).Value2 = data;
+                var sheetNameForText = Convert.ToString(((dynamic)sheet).Name, CultureInfo.InvariantCulture);
+                WriteTextRunsPreservingNumberFormat(
+                    range, writes, rows, cols, $"{sheetNameForText}!{rangeAddr}", mismatches);
+            }
+
+            var sheetName = Convert.ToString(((dynamic)sheet).Name, CultureInfo.InvariantCulture);
+            exec.Affected.Add(new AffectedRef("range", $"{sheetName}!{rangeAddr}"));
+            var originRow = Convert.ToInt32(((dynamic)range).Row, CultureInfo.InvariantCulture);
+            var originCol = Convert.ToInt32(((dynamic)range).Column, CultureInfo.InvariantCulture);
+
+            if (formulas)
+            {
+                object? raw = formulaEngine == ExcelFormula2Contract.EngineFormula2
+                    ? ((dynamic)range).Formula2
+                    : ((dynamic)range).Formula;
+                for (var i = 0; i < rows; i++)
+                for (var j = 0; j < cols; j++)
+                {
+                    checkedCells++;
+                    var want = data[i, j];
+                    object? got = raw is object[,] arr ? arr[i + 1, j + 1] : raw;
+                    if (!ComValuesEqual(want, got))
+                        mismatches.Add($"{CellName(originCol + j, originRow + i)}: want '{ToDisp(want)}', got '{ToDisp(got)}'");
+                }
+            }
+            else
+            {
+                object? raw = ((dynamic)range).Value2;
+                for (var i = 0; i < rows; i++)
+                for (var j = 0; j < cols; j++)
+                {
+                    checkedCells++;
+                    object? got = raw is object[,] arr ? arr[i + 1, j + 1] : raw;
+                    if (!ExcelValueWriteContract.TypedEqual(writes[i, j], got))
+                        mismatches.Add(
+                            $"{CellName(originCol + j, originRow + i)}: want '{writes[i, j].Text ?? ToDisp(writes[i, j].ComValue)}' ({writes[i, j].Kind}), got '{ToDisp(got)}'");
+                }
+            }
+
+            if (formulas && formulaEngine is string engine)
+            {
+                var publicReadback = CaptureFormula2PublicReadback(range, rangeAddr, engine);
+                exec.Formula2Readbacks.Add(publicReadback);
+                if (engine == ExcelFormula2Contract.EngineFormula2)
+                {
+                    var footprint = ExcelFormula2Contract.ResolveCaptureFootprint(op, rows, cols);
+                    var spillRange = ExcelFormula2Contract.CleanA1(Json.GetString(publicReadback, "spillRange"));
+                    var destAddress = ExcelFormula2Contract.CleanA1(rangeAddr);
+                    bool? hasSpill = publicReadback["hasSpill"] is JsonValue spillFlag && spillFlag.TryGetValue<bool>(out var flag)
+                        ? flag
+                        : null;
+                    RecordFormula2Spill(sheetName, destAddress, spillRange, footprint.Rows, footprint.Columns,
+                        hasSpill == true);
+                    if (hasSpill == true &&
+                        !ExcelFormula2Contract.AcceptsActualSpill(op, destAddress, spillRange, footprint.Rows, footprint.Columns))
+                        mismatches.Add(
+                            $"{sheetName}!{destAddress}: Formula2 spill '{spillRange}' is not an owned dynamic spill for captured footprint {footprint.Rows}x{footprint.Columns}");
+                }
+            }
+        }
+        finally
+        {
+            RotHelper.ReleaseComReference(range);
+            RotHelper.ReleaseComReference(sheet);
+        }
+    }
+
+    private static void WriteTextRunsPreservingNumberFormat(
+        object range, ExcelValueWriteContract.CellWrite[,] writes, int rows, int cols,
+        string label, List<string> mismatches)
+    {
+        object? cells = null;
+        try
+        {
+            cells = (object)((dynamic)range).Cells;
+            foreach (var (row, start, length) in ExcelValueWriteContract.ContiguousTextRuns(writes, rows, cols))
+            {
+                object? startCell = null;
+                object? run = null;
+                try
+                {
+                    startCell = (object)((dynamic)cells).Item(row + 1, start + 1);
+                    run = length == 1 ? startCell : (object)((dynamic)startCell).Resize(1, length);
+                    WriteOneTextRunPreservingNumberFormat(run!, writes, row, start, length, label, mismatches);
+                }
+                finally
+                {
+                    if (run != startCell)
+                        RotHelper.ReleaseComReference(run);
+                    RotHelper.ReleaseComReference(startCell);
+                }
+            }
+        }
+        finally { RotHelper.ReleaseComReference(cells); }
+    }
+
+    private static void WriteOneTextRunPreservingNumberFormat(
+        object run, ExcelValueWriteContract.CellWrite[,] writes, int row, int start, int length,
+        string label, List<string> mismatches)
+    {
+        IReadOnlyList<string>? captured = null;
+        Exception? pending = null;
+        try
+        {
+            captured = CaptureRunNumberFormatsOrThrow(run, length);
+            ((dynamic)run).NumberFormat = ExcelValueWriteContract.TextNumberFormat;
+            if (length == 1)
+            {
+                ((dynamic)run).Value2 = writes[row, start].Text ?? "";
+            }
+            else
+            {
+                var block = new object[1, length];
+                for (var c = 0; c < length; c++)
+                    block[0, c] = writes[row, start + c].Text ?? "";
+                ((dynamic)run).Value2 = block;
+            }
+        }
+        catch (Exception ex)
+        {
+            pending = ex;
+        }
+        finally
+        {
+            if (captured is not null)
+                RestoreRunNumberFormats(run, captured);
+        }
+
+        if (pending is not null)
+            throw pending;
+        if (captured is null)
+            throw new InvalidOperationException($"{label}: NumberFormat capture missing after text write");
+
+        RewriteCoercedTextWithApostrophe(run, writes, row, start, length);
+        IReadOnlyList<string> after;
+        try
+        {
+            after = CaptureRunNumberFormatsOrThrow(run, length);
+        }
+        catch (Exception ex)
+        {
+            mismatches.Add($"{label}: NumberFormat readback failed after text write: {ex.Message}");
+            return;
+        }
+
+        if (!ExcelNumberFormatPreserve.FormatsRetained(captured, after))
+            mismatches.Add(
+                $"{label}: NumberFormat not retained after text write; before=[{string.Join(",", captured)}], after=[{string.Join(",", after)}]");
+    }
+
+    private static IReadOnlyList<string> CaptureRunNumberFormatsOrThrow(object run, int length)
+    {
+        object? raw = null;
+        try { raw = ((dynamic)run).NumberFormat; }
+        catch { raw = null; }
+
+        IReadOnlyList<string>? perCell = null;
+        if (ExcelNumberFormatPreserve.NeedsPerCellCapture(raw))
+            perCell = ReadPerCellNumberFormatsOrThrow(run, length);
+
+        if (!ExcelNumberFormatPreserve.TryNormalizeCapture(raw, perCell, length, out var capture, out var error))
+            throw new InvalidOperationException(error);
+        return capture.Formats;
+    }
+
+    private static IReadOnlyList<string> ReadPerCellNumberFormatsOrThrow(object run, int length)
+    {
+        var formats = new string[length];
+        for (var i = 0; i < length; i++)
+        {
+            object? cell = null;
+            try
+            {
+                cell = length == 1 ? run : (object)((dynamic)run).Cells[1, i + 1];
+                var format = Convert.ToString(((dynamic)cell).NumberFormat, CultureInfo.InvariantCulture);
+                if (string.IsNullOrEmpty(format))
+                    throw new InvalidOperationException(
+                        $"per-cell NumberFormat capture failed at index {i}; refusing text write");
+                formats[i] = format;
+            }
+            finally
+            {
+                if (cell is not null && !ReferenceEquals(cell, run))
+                    RotHelper.ReleaseComReference(cell);
             }
         }
 
-        if (formulas) range.Formula = data;
-        else range.Value2 = data;
-        exec.Affected.Add(new AffectedRef("range", $"{sheet.Name}!{rangeAddr}"));
+        return formats;
+    }
 
-        // readback
-        object? raw = formulas ? range.Formula : range.Value2;
-        for (var i = 0; i < rows; i++)
-            for (var j = 0; j < cols; j++)
+    private static void RestoreRunNumberFormats(object run, IReadOnlyList<string> formats)
+    {
+        if (formats.Count == 0)
+            return;
+        if (formats.Distinct(StringComparer.Ordinal).Count() == 1)
+        {
+            ((dynamic)run).NumberFormat = formats[0];
+            return;
+        }
+
+        for (var i = 0; i < formats.Count; i++)
+        {
+            object? cell = null;
+            try
             {
-                checkedCells++;
-                var want = data[i, j];
-                object? got = raw is object[,] arr ? arr[i + 1, j + 1] : raw;
-                if (!ComValuesEqual(want, got))
-                    mismatches.Add($"{CellName(range.Column + j, range.Row + i)}: want '{ToDisp(want)}', got '{ToDisp(got)}'");
+                cell = formats.Count == 1 ? run : (object)((dynamic)run).Cells[1, i + 1];
+                ((dynamic)cell).NumberFormat = formats[i];
             }
+            finally
+            {
+                if (cell is not null && !ReferenceEquals(cell, run))
+                    RotHelper.ReleaseComReference(cell);
+            }
+        }
+    }
+
+    private static void RewriteCoercedTextWithApostrophe(
+        object run, ExcelValueWriteContract.CellWrite[,] writes, int row, int start, int length)
+    {
+        object? raw = ((dynamic)run).Value2;
+        if (length == 1)
+        {
+            if (writes[row, start].Kind == ExcelValueWriteContract.JsonKind.String &&
+                ExcelValueWriteContract.IsComNumber(raw))
+                ((dynamic)run).Value2 = "'" + writes[row, start].Text;
+            return;
+        }
+
+        for (var c = 0; c < length; c++)
+        {
+            if (writes[row, start + c].Kind != ExcelValueWriteContract.JsonKind.String)
+                continue;
+            object? got = raw is object[,] arr ? arr[1, c + 1] : raw;
+            if (!ExcelValueWriteContract.IsComNumber(got))
+                continue;
+            object? cell = null;
+            try
+            {
+                cell = (object)((dynamic)run).Item(1, c + 1);
+                ((dynamic)cell).Value2 = "'" + writes[row, start + c].Text;
+            }
+            finally { RotHelper.ReleaseComReference(cell); }
+        }
     }
 
     private static void ApplyCopySheet(dynamic destinationApp, dynamic destinationWorkbook,
@@ -1738,6 +2388,16 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
         || string.Equals(restoreMode, CopySheetTopologyRestoreMode, StringComparison.Ordinal)
         || string.Equals(restoreMode, VisibilityRestoreMode, StringComparison.Ordinal)
         || string.Equals(restoreMode, MergeRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, SheetLayoutRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, RenameRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, RangeEditRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, DeleteStripRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, StructureRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, ProtectRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, LifecycleRestoreMode, StringComparison.Ordinal)
+        || IsDataObjectsRestoreMode(restoreMode)
+        || string.Equals(restoreMode, ExtendedOpsRestoreMode, StringComparison.Ordinal)
+        || string.Equals(restoreMode, ExcelFormula2Contract.RestoreMode, StringComparison.Ordinal)
         || string.Equals(restoreMode, LegacyFullRangeRestoreMode, StringComparison.Ordinal);
 
     private sealed class RestoreMismatchCollector
@@ -1998,9 +2658,22 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
     {
         ComInvoke(() =>
         {
-            var app = AttachExcel();
+            var allowCreate = IsCreateOrOpenOnly(ops) &&
+                              string.Equals(Json.GetString(ops![0], "op"), "create_workbook", StringComparison.OrdinalIgnoreCase);
+            var app = AttachExcel(allowCreate);
             if (app is null) { metadata["payload"] = "none (excel not running)"; return; }
             dynamic d = app;
+            _lastSnapshotDir = snapshotDir;
+            if (IsCreateOrOpenOnly(ops))
+            {
+                var lifecycleState = CaptureLifecycleState(
+                    (object)d, null, ops ?? Array.Empty<JsonObject>(), documentRef: null, snapshotDir);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), lifecycleState.ToJsonString(Json.Pretty));
+                metadata["payload"] = "lifecycle state.json";
+                metadata["restoreMode"] = LifecycleRestoreMode;
+                return;
+            }
+
             dynamic? defaultWorkbook = d.ActiveWorkbook;
             if (defaultWorkbook is null) { metadata["payload"] = "none (no workbook)"; return; }
             using var workbookLease = ResolveTargetWorkbook(d, defaultWorkbook, ops);
@@ -2025,8 +2698,13 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             //    Saved 플래그를 명시한다. DOCBRIDGE_EXCEL_FRESH_WORKBOOK_BACKUP=1일
             //    때만 일반 .xlsx의 저장 전 상태를 SaveCopyAs로 복사한다. 작은 편집이
             //    workbook 전체 직렬화 비용을 기본으로 치르지 않게 하기 위한 선택이다.
+            var recoveryNeedsFreshCopy = IsDeleteOnlySnapshot(ops) || IsLifecycleOnlySnapshot(ops) ||
+                                        (ops?.Any(op => Json.GetString(op, "op") is "delete_sheet" or "delete_rows" or "delete_cols") ?? false);
             CaptureAuxiliaryWorkbookBackup(
-                (object)wb, app, snapshotDir, metadata, App, ExcelWorkbookBackupPolicy.FromEnvironment());
+                (object)wb, app, snapshotDir, metadata, App,
+                recoveryNeedsFreshCopy
+                    ? new ExcelWorkbookBackupPolicy(FreshCopyEnabled: true)
+                    : ExcelWorkbookBackupPolicy.FromEnvironment());
 
             // copy_sheet-only batches have a complete, operation-scoped inverse: remove the
             // newly created target worksheets in reverse order. Capturing or rewriting every
@@ -2058,13 +2736,139 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
 
             if (IsMergeOnlySnapshot(ops))
             {
-                var mergeState = CaptureMergeState(
+                var mergeState = CaptureMergeBatchState(
                     (object)wb,
-                    ops![0],
+                    ops ?? throw new InvalidOperationException("merge snapshot operations are missing"),
                     fullName);
                 File.WriteAllText(Path.Combine(snapshotDir, "state.json"), mergeState.ToJsonString(Json.Pretty));
                 metadata["payload"] = "workbook-backup + merge state.json";
                 metadata["documentRef"] = fullName;
+                return;
+            }
+
+            if (IsSheetLayoutOnlySnapshot(ops))
+            {
+                var layoutState = CaptureSheetLayoutState(
+                    (object)wb,
+                    ops ?? throw new InvalidOperationException("sheet-layout snapshot operations are missing"),
+                    fullName);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), layoutState.ToJsonString(Json.Pretty));
+                metadata["payload"] = "workbook-backup + sheet-layout state.json";
+                metadata["documentRef"] = fullName;
+                return;
+            }
+
+            if (IsRenameOnlySnapshot(ops))
+            {
+                var renameState = CaptureRenameState(
+                    (object)wb,
+                    ops ?? throw new InvalidOperationException("rename snapshot operations are missing"),
+                    fullName);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), renameState.ToJsonString(Json.Pretty));
+                metadata["payload"] = "workbook-backup + rename state.json";
+                metadata["documentRef"] = fullName;
+                return;
+            }
+
+            if (IsRangeEditOnlySnapshot(ops))
+            {
+                var rangeState = CaptureRangeEditState(
+                    (object)wb,
+                    ops ?? throw new InvalidOperationException("range-edit snapshot operations are missing"),
+                    fullName);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), rangeState.ToJsonString(Json.Pretty));
+                metadata["payload"] = "workbook-backup + range-edit state.json";
+                metadata["documentRef"] = fullName;
+                return;
+            }
+
+            if (IsDeleteOnlySnapshot(ops))
+            {
+                var deleteState = CaptureDeleteState(
+                    (object)wb,
+                    ops ?? throw new InvalidOperationException("delete snapshot operations are missing"),
+                    fullName,
+                    snapshotDir);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), deleteState.ToJsonString(Json.Pretty));
+                metadata["payload"] = "workbook-backup + delete-strip state.json";
+                metadata["documentRef"] = fullName;
+                return;
+            }
+
+            if (IsStructureOnlySnapshot(ops))
+            {
+                var structureState = CaptureStructureState(
+                    (object)wb,
+                    ops ?? throw new InvalidOperationException("structure snapshot operations are missing"),
+                    fullName,
+                    snapshotDir,
+                    metadata);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), structureState.ToJsonString(Json.Pretty));
+                metadata["payload"] = "workbook-backup + sheet-structure state.json";
+                metadata["documentRef"] = fullName;
+                return;
+            }
+
+            if (IsProtectOnlySnapshot(ops))
+            {
+                var protectState = CaptureProtectState(
+                    (object)wb,
+                    ops ?? throw new InvalidOperationException("protect snapshot operations are missing"),
+                    fullName);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), protectState.ToJsonString(Json.Pretty));
+                metadata["payload"] = "workbook-backup + protect state.json";
+                metadata["documentRef"] = fullName;
+                return;
+            }
+
+            if (IsLifecycleOnlySnapshot(ops))
+            {
+                var lifecycleState = CaptureLifecycleState(
+                    (object)d, (object)wb,
+                    ops ?? throw new InvalidOperationException("lifecycle snapshot operations are missing"),
+                    fullName,
+                    snapshotDir);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), lifecycleState.ToJsonString(Json.Pretty));
+                metadata["payload"] = "workbook-backup + lifecycle state.json";
+                metadata["documentRef"] = fullName;
+                return;
+            }
+
+            if (IsDataOnlySnapshot(ops))
+            {
+                var dataState = CaptureDataOnlyState(
+                    (object)wb,
+                    ops ?? throw new InvalidOperationException("data snapshot operations are missing"),
+                    fullName);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), dataState.ToJsonString(Json.Pretty));
+                metadata["payload"] = "workbook-backup + data-objects state.json";
+                metadata["documentRef"] = fullName;
+                return;
+            }
+
+            if (IsExtendedOnlySnapshot(ops))
+            {
+                var extendedState = CaptureExtendedOpsState(
+                    (object)wb,
+                    ops ?? throw new InvalidOperationException("extended snapshot operations are missing"),
+                    fullName);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), extendedState.ToJsonString(Json.Pretty));
+                metadata["payload"] = "workbook-backup + extended-ops state.json";
+                metadata["documentRef"] = fullName;
+                metadata["restoreMode"] = ExtendedOpsRestoreMode;
+                return;
+            }
+
+            if (IsFormula2WriteSnapshot(ops))
+            {
+                var formula2State = CaptureFormula2WriteState(
+                    (object)wb,
+                    ops ?? throw new InvalidOperationException("formula2 snapshot operations are missing"),
+                    fullName);
+                File.WriteAllText(Path.Combine(snapshotDir, "state.json"), formula2State.ToJsonString(Json.Pretty));
+                metadata["payload"] = "workbook-backup + formula2-range state.json";
+                metadata["documentRef"] = fullName;
+                metadata["restoreMode"] = ExcelFormula2Contract.RestoreMode;
                 return;
             }
 
@@ -2178,6 +2982,8 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                 return RestoreDeferredFormatOnlySnapshot(snapshotDir, metadata, state);
             if (LooksLikeIncompleteDeferredFormatEnvelope(state))
                 return Json.ErrorResult("incomplete deferred format-only envelope", App);
+            if (string.Equals(restoreMode, LifecycleRestoreMode, StringComparison.Ordinal))
+                return RestoreLifecycleState((object)app, state);
             if (string.Equals(restoreMode, FormatOnlyRestoreMode, StringComparison.Ordinal))
             {
                 var documentRef = Json.GetString(state, "documentRef") ?? Json.GetString(metadata, "documentRef");
@@ -2224,10 +3030,31 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             }
             if (string.Equals(restoreMode, MergeRestoreMode, StringComparison.Ordinal))
             {
-                if (Json.GetInt(state, "snapshotVersion") != ExcelLayoutSnapshotVersion)
+                var mergeVersion = Json.GetInt(state, "snapshotVersion") ?? ExcelLayoutSnapshotVersion;
+                if (mergeVersion is not (ExcelLayoutSnapshotVersion or ExcelMergeBatchSnapshotVersion))
                     return Json.ErrorResult("unsupported Excel merge snapshot version", App);
                 return RestoreMergeState((object)wb, state);
             }
+            if (string.Equals(restoreMode, SheetLayoutRestoreMode, StringComparison.Ordinal))
+                return RestoreSheetLayoutState((object)wb, state);
+            if (string.Equals(restoreMode, RenameRestoreMode, StringComparison.Ordinal))
+                return RestoreRenameState((object)wb, state);
+            if (string.Equals(restoreMode, RangeEditRestoreMode, StringComparison.Ordinal))
+                return RestoreRangeEditState((object)wb, state);
+            if (string.Equals(restoreMode, DeleteStripRestoreMode, StringComparison.Ordinal))
+                return RestoreDeleteState((object)wb, state);
+            if (string.Equals(restoreMode, StructureRestoreMode, StringComparison.Ordinal))
+                return RestoreStructureState((object)d, (object)wb, state, snapshotDir);
+            if (string.Equals(restoreMode, ProtectRestoreMode, StringComparison.Ordinal))
+                return RestoreProtectState((object)wb, state);
+            if (IsDataObjectsRestoreMode(restoreMode))
+                return RestoreDataOnlyState((object)wb, state);
+            if (string.Equals(restoreMode, ExtendedOpsRestoreMode, StringComparison.Ordinal))
+                return RestoreExtendedOpsState((object)wb, state);
+            if (string.Equals(restoreMode, ExcelFormula2Contract.RestoreMode, StringComparison.Ordinal))
+                return RestoreFormula2WriteState((object)wb, state);
+
+            ClearFormula2SpillFootprints((object)wb, state);
 
             // Versionless snapshots from 0.4.14 and earlier retain their original full-range
             // restore behavior. Do not attempt formula-string normalization here: preserving
@@ -2508,7 +3335,7 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             dynamicFont.Size = style["fontSize"]!.GetValue<double>();
             dynamicFont.Underline = style["underline"]!.GetValue<int>();
             dynamicFont.Strikethrough = Json.GetBool(style, "strikethrough");
-            dynamicCell.NumberFormat = Json.GetString(style, "numberFormat") ?? "General";
+            AssignRangeNumberFormat(dynamicCell, Json.GetString(style, "numberFormat") ?? "General");
             dynamicFont.Color = style["fontColor"]!.GetValue<double>();
             dynamicInterior.PatternColor = style["fillPatternColor"]!.GetValue<double>();
             dynamicInterior.Color = style["fillColor"]!.GetValue<double>();
@@ -2549,7 +3376,9 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
                    && Math.Abs(Convert.ToDouble(dynamicFont.Size, CultureInfo.InvariantCulture) - style["fontSize"]!.GetValue<double>()) < 1e-9
                    && Convert.ToInt32(dynamicFont.Underline, CultureInfo.InvariantCulture) == style["underline"]!.GetValue<int>()
                    && Convert.ToBoolean(dynamicFont.Strikethrough, CultureInfo.InvariantCulture) == Json.GetBool(style, "strikethrough")
-                   && string.Equals(Convert.ToString(dynamicCell.NumberFormat, CultureInfo.InvariantCulture), Json.GetString(style, "numberFormat"), StringComparison.Ordinal)
+                   && ExcelNumberFormatContract.ReadbackMatches(
+                       Json.GetString(style, "numberFormat"),
+                       Convert.ToString(dynamicCell.NumberFormat, CultureInfo.InvariantCulture))
                    && Math.Abs(Convert.ToDouble(dynamicFont.Color, CultureInfo.InvariantCulture) - style["fontColor"]!.GetValue<double>()) < 1e-9
                    && Math.Abs(Convert.ToDouble(dynamicInterior.Color, CultureInfo.InvariantCulture) - style["fillColor"]!.GetValue<double>()) < 1e-9
                    && Convert.ToInt32(dynamicInterior.Pattern, CultureInfo.InvariantCulture) == style["fillPattern"]!.GetValue<int>()
@@ -2616,7 +3445,7 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             dynamicFont.Bold = Json.GetBool(style, "bold");
             dynamicFont.Italic = Json.GetBool(style, "italic");
             dynamicFont.Size = style["fontSize"]!.GetValue<double>();
-            dynamicCell.NumberFormat = Json.GetString(style, "numberFormat") ?? "General";
+            AssignRangeNumberFormat(dynamicCell, Json.GetString(style, "numberFormat") ?? "General");
             dynamicFont.Color = style["fontColor"]!.GetValue<double>();
             dynamicInterior.Color = style["fillColor"]!.GetValue<double>();
         }
@@ -2641,7 +3470,9 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
             return Convert.ToBoolean(dynamicFont.Bold, CultureInfo.InvariantCulture) == Json.GetBool(style, "bold")
                    && Convert.ToBoolean(dynamicFont.Italic, CultureInfo.InvariantCulture) == Json.GetBool(style, "italic")
                    && Math.Abs(Convert.ToDouble(dynamicFont.Size, CultureInfo.InvariantCulture) - style["fontSize"]!.GetValue<double>()) < 1e-9
-                   && string.Equals(Convert.ToString(dynamicCell.NumberFormat, CultureInfo.InvariantCulture), Json.GetString(style, "numberFormat"), StringComparison.Ordinal)
+                   && ExcelNumberFormatContract.ReadbackMatches(
+                       Json.GetString(style, "numberFormat"),
+                       Convert.ToString(dynamicCell.NumberFormat, CultureInfo.InvariantCulture))
                    && Math.Abs(Convert.ToDouble(dynamicFont.Color, CultureInfo.InvariantCulture) - style["fontColor"]!.GetValue<double>()) < 1e-9
                    && Math.Abs(Convert.ToDouble(dynamicInterior.Color, CultureInfo.InvariantCulture) - style["fillColor"]!.GetValue<double>()) < 1e-9;
         }
@@ -2698,12 +3529,16 @@ public sealed partial class ExcelAdapter : ComAdapterBase, IConnectionLifecycleA
 
     private static bool ComValuesEqual(object? expected, object? actual)
     {
-        if (expected is null || actual is null) return expected is null && actual is null;
+        if (expected is null || actual is null)
+            return expected is null && actual is null;
         if (IsNumber(expected) && IsNumber(actual))
             return Math.Abs(Convert.ToDouble(expected, CultureInfo.InvariantCulture) -
                             Convert.ToDouble(actual, CultureInfo.InvariantCulture)) < 1e-9;
         if (expected is bool eb && actual is bool ab) return eb == ab;
-        return string.Equals(ToDisp(expected), ToDisp(actual), StringComparison.Ordinal);
+        if (expected is string || actual is string)
+            return expected is string es && actual is string @as &&
+                   string.Equals(es, @as, StringComparison.Ordinal);
+        return false;
     }
 
     private static bool IsNumber(object value) => value is byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal;

@@ -28,6 +28,8 @@
     <Content Include="..\..\assets\hwp-security\FilePathCheckerModuleExample.dll"
              Link="hwp-security\FilePathCheckerModuleExample.dll"
              CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="evidence\zero-length-string-merge.json"
+             CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

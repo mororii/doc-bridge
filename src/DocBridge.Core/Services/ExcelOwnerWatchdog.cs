@@ -8,7 +8,8 @@ namespace DocBridge.Core.Services;
 /// Out-of-process lifetime guard for an Excel instance created by DocBridge. Managed shutdown
 /// hooks cannot run after TerminateProcess/taskkill /F, so the guard acquires its own exact-PID
 /// COM reference while the owner is alive. If the owner disappears without signalling release,
-/// it calls Quit only when every workbook is saved (or there are no workbooks).
+/// it calls Quit only when the owned Application is proven empty. A nonempty
+/// collection — saved or unsaved — is detached, never auto-Quit.
 /// </summary>
 public static class ExcelOwnerWatchdog
 {
@@ -172,8 +173,8 @@ public static class ExcelOwnerWatchdog
                 }
                 else
                 {
-                    // Owner vanished without the normal release signal. Never suppress prompts
-                    // and never close an unsaved workbook. A clean owned instance can exit.
+                    // Owner vanished without the normal release signal. Never suppress prompts.
+                    // Auto-Quit only a proven empty owned Application; Saved books stay open.
                     Trace("parent-gone", $"excelPid={excelProcessId} parentPid={parentProcessId}");
                     quitAttempted = TryQuitSafely(application);
                     result = quitAttempted ? 0 : 4;
@@ -242,26 +243,20 @@ public static class ExcelOwnerWatchdog
         try
         {
             workbooks = (object)((dynamic)application).Workbooks;
-            var count = Convert.ToInt32(((dynamic)workbooks).Count, CultureInfo.InvariantCulture);
-            for (var index = 1; index <= count; index++)
+            var count = Convert.ToInt32((object)((dynamic)workbooks).Count, CultureInfo.InvariantCulture);
+            if (!ExcelApplicationQuitContract.MayAutoQuit(true, count))
             {
-                object? workbook = null;
-                try
-                {
-                    workbook = (object)((dynamic)workbooks).Item(index);
-                    if (!Convert.ToBoolean(((dynamic)workbook).Saved, CultureInfo.InvariantCulture))
-                    {
-                        Trace("quit-skip", $"excelPid-unknown reason=unsaved-workbook index={index}");
-                        return false;
-                    }
-                }
-                catch { return false; }
-                finally { RotHelper.ReleaseComObject(workbook); }
+                Trace("quit-skip", $"reason=nonempty-or-unproven-collection count={count}");
+                return false;
             }
             ((dynamic)application).Quit();
             return true;
         }
-        finally { RotHelper.ReleaseComObject(workbooks); }
+        catch
+        {
+            return false;
+        }
+        finally { RotHelper.ReleaseComReference(workbooks); }
     }
 
     private static bool ParentIsAlive(int processId)

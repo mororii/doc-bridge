@@ -1,4 +1,4 @@
-# DocBridge 0.4.21
+# DocBridge 0.4.22
 
 Windows의 Microsoft Excel, 한컴 한글(HWP/HWPX), AutoCAD 및 GstarCAD를 Kimi·Claude·Codex·Cursor가 공통 MCP 도구로 읽고 수정하게 하는 로컬 브리지입니다.
 
@@ -16,6 +16,10 @@ Windows의 Microsoft Excel, 한컴 한글(HWP/HWPX), AutoCAD 및 GstarCAD를 Kim
 처음 설치한다면 [INSTALL.md](INSTALL.md)를 먼저 보세요.
 
 ## 현재 검증 상태
+
+0.4.22는 Excel 쓰기 op 16종과 조회 scope 4종을 추가합니다. 외부 링크 목록·새로고침·원본 변경·끊기, 계산 모드(수동/자동/준자동 + 전체/전체재작성), 값 고정, 클립보드 없는 선택 붙여넣기(값/수식/서식/전체 + 전치·빈칸건너뜀·사칙연산), 목표값 찾기, 암호 없는 통합문서 보호/해제, 창 분할, 스파크라인 생성/수정/삭제, 슬라이서 생성/삭제, 셀 스타일 적용과 `links`/`sparklines`/`slicers`/`cellStyles` 조회입니다. `set_sheet_visibility`는 `veryHidden`을 지원합니다. VBA·매크로는 범위 밖입니다. 상세 계약은 [EXCEL-WORKBOOK-OPS.md](docs/EXCEL-WORKBOOK-OPS.md)입니다.
+
+0.4.22는 이와 함께 사용자가 지목한 Excel 창에만 붙는 인스턴스 핀(`excel_launch`의 `processId`/`hwnd`/`activeWindow`, 이후 호출은 핀 창 전용, 소멸 시 명시 오류)과 테두리 공유 변 간섭 방지(같은 배치의 그리기 뒤 지우기는 `[EXCEL_BORDER_ORDER]` 거절, 다른 배치는 `[EXCEL_BORDER_SHARED_EDGE]` 경고)를 추가합니다. `excel_launch`는 워커 경로(`--excel-worker`)로도 연결됩니다.
 
 0.4.21은 Excel **지연 서식 체크포인트**를 실제 execute 경로(호스트와 CLI worker)에 추가합니다. 기본값은 꺼져 있고 `DOCBRIDGE_EXCEL_DEFERRED_FORMAT_SNAPSHOT=1`(정확히 `1`만 활성)일 때만 후보를 검사합니다. 적용 전에 저장 전 메모리 상태를 체크포인트로 복사하고, 복구가 필요할 때 그 사본에서 **그 작업이 바꾼 서식만** 읽어 되돌립니다. 전체 워크북을 덮어쓰지 않으며 체크포인트 이후에 입력한 값·수식·대상 밖 서식은 유지합니다. 사용자 승인 단계를 새로 추가하지 않았습니다. 정상 적용이 빨라지는 대신 **복구는 느려집니다**. 후보 범위는 단일 `format_range`(`fillColor` 포함, 시트와 직사각형 A1 명시), 1,000~5,000셀, 로컬 일반 `.xlsx`, 원본과 체크포인트 각각 16MiB 이하입니다. **모든 수식**과 매크로·외부 연결·보호·암호·병합·웹 추가 기능 같은 복잡한 파트가 있으면 **변경 전에** 기존 스냅샷 경로로 되돌아갑니다. 다만 체크포인트 사본을 시도한 뒤 워크북이 그대로임을 확인하지 못하면 되돌아가지 않고 스냅샷을 거절해 그 편집이 진행되지 않게 합니다. 복구는 Excel과 대상 워크북이 살아 있는 세션을 요구하며 크래시 복구가 아닙니다. 계약은 [Excel 작업 안내](docs/EXCEL-OPERATIONS.md), 변경 요약과 사용 지침은 [RELEASE-0.4.21.md](docs/RELEASE-0.4.21.md)에 있습니다.
 

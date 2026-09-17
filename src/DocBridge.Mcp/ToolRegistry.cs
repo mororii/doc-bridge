@@ -67,19 +67,26 @@ public sealed class ToolRegistry
         {
             var schema = ApplyOpsSchema("excel",
                 "set_values, set_formulas, insert_rows, insert_cols, format_range, find_replace, copy_sheet, " +
-                "merge_cells, unmerge_cells, set_rows_hidden, set_cols_hidden, set_sheet_visibility");
+                "merge_cells, unmerge_cells, set_rows_hidden, set_cols_hidden, set_sheet_visibility, " +
+                "set_row_heights, set_column_widths, freeze_panes, set_page_setup, rename_sheet, " +
+                "clear_range, copy_range, delete_rows, delete_cols, add_sheet, move_sheet, " +
+                "protect_sheet, unprotect_sheet, create_workbook, open_workbook, close_workbook, save_workbook, export_pdf, " +
+                "fill/auto_fill/calculate, delete_sheet, set_tab_color, set_outline, set_view, csv, page breaks, " +
+                "and data/reporting ops (tables, sort/filter, names, validation, charts, pictures, notes, hyperlinks)");
             schema["description"] =
                 "Excel 쓰기 배치. 쓰기 대상 시트는 절대로 활성 시트로 추정하지 않습니다. " +
                 "set_values/set_formulas/format_range는 target.sheet 또는 '시트 이름'!A1 형식의 range가 필요하고, " +
-                "insert_rows/insert_cols, 숨김/표시 작업 및 sheet 범위 find_replace는 target.sheet가 필요합니다. " +
+                "insert_rows/insert_cols, 숨김/표시/레이아웃/보호 작업 및 sheet 범위 find_replace는 target.sheet가 필요합니다. " +
                 "merge_cells는 좌상단 외 셀에 값/수식이 있으면 데이터 손실 방지를 위해 거부합니다. " +
+                "같은 종류의 비겹침 merge/unmerge는 한 batch에서 최대 400개까지 허용합니다. " +
                 "활성 시트와 마지막 표시 시트는 숨기지 않습니다. " +
                 "find_replace의 target.scope='workbook'과 copy_sheet는 자체적으로 대상을 명시합니다. " +
                 "일반 셀 값/수식/서식은 executionMode=execute + requestId + expectedDocumentRef로 한 번에 적용할 수 있습니다. " +
-                "행열 삽입, 병합, 숨김, 시트 복사와 미리보기·고위험은 dryRun=true로 diff+confirmToken을 받은 뒤 동일한 ops를 dryRun=false+confirmToken으로 다시 호출합니다.";
+                "병합, 숨김, 레이아웃, 시트 구조, 저장/PDF, 데이터 객체와 미리보기·고위험은 dryRun=true로 diff+confirmToken을 받은 뒤 동일한 ops를 dryRun=false+confirmToken으로 다시 호출합니다. " +
+                "Book1 등 미저장 이름은 경로를 만들려고 저장하지 않습니다.";
 
             var items = (JsonObject)((JsonObject)((JsonObject)schema["properties"]!)["ops"]!)["items"]!;
-            items["properties"] = new JsonObject
+            var properties = new JsonObject
             {
                 ["op"] = new JsonObject
                 {
@@ -88,7 +95,20 @@ public sealed class ToolRegistry
                         "set_values", "set_formulas", "insert_rows", "insert_cols",
                         "format_range", "find_replace", "copy_sheet",
                         "merge_cells", "unmerge_cells", "set_rows_hidden", "set_cols_hidden",
-                        "set_sheet_visibility"),
+                        "set_sheet_visibility",
+                        "set_row_heights", "set_column_widths", "freeze_panes", "set_page_setup",
+                        "rename_sheet", "clear_range", "copy_range", "delete_rows", "delete_cols",
+                        "add_sheet", "move_sheet", "protect_sheet", "unprotect_sheet",
+                        "create_workbook", "open_workbook", "close_workbook", "save_workbook", "export_pdf",
+                        "fill_range", "auto_fill", "calculate", "delete_sheet", "set_tab_color",
+                        "set_outline", "set_view", "import_csv", "export_csv", "set_page_breaks",
+                        "create_table", "resize_table", "style_table", "set_table_totals",
+                        "sort_range", "sort_table", "set_auto_filter", "clear_auto_filter",
+                        "define_name", "update_name", "delete_name",
+                        "set_data_validation", "clear_data_validation",
+                        "add_conditional_format", "clear_conditional_formats",
+                        "create_chart", "update_chart", "insert_sheet_picture", "update_picture",
+                        "set_cell_note", "clear_cell_note", "set_hyperlink", "clear_hyperlink"),
                 },
                 ["range"] = new JsonObject
                 {
@@ -154,6 +174,19 @@ public sealed class ToolRegistry
                 ["targetSheet"] = new JsonObject { ["type"] = "string" },
                 ["targetWorkbook"] = new JsonObject { ["type"] = "string" },
             };
+            items["properties"] = properties;
+            var opEnum = (JsonArray)((JsonObject)properties["op"]!)["enum"]!;
+            foreach (var name in ExcelDataOperationsContract.WriteOpNames)
+            {
+                if (opEnum.Any(node => node is JsonValue value && value.TryGetValue<string>(out var item) &&
+                                       item.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                opEnum.Add(name);
+            }
+            foreach (var (key, node) in ExcelAuthoringSchema.DescribeApplyOpProperties())
+                properties[key] = node is null ? null : node.DeepClone();
+            ExcelDataOperationSchema.AttachToApplyItems(items);
+            schema["dataContract"] = ExcelDataOperationsContract.DescribeSchema();
             return schema;
         }
 
@@ -575,6 +608,37 @@ public sealed class ToolRegistry
                         },
                         ["sheet"] = new JsonObject { ["type"] = "string" },
                         ["includeFormulas"] = new JsonObject { ["type"] = "boolean" },
+                        ["formulaMode"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = new JsonArray("formula", "formula2"),
+                            ["description"] = "includeFormulas=true일 때 수식 읽기 엔진. 기본 formula; 동적 배열 의미론은 formula2를 명시합니다.",
+                        },
+                        ["rowOffset"] = new JsonObject
+                        {
+                            ["type"] = "integer", ["minimum"] = 0,
+                            ["description"] = "요청 range 내부의 0-based 시작 행. continuation 값을 그대로 사용합니다.",
+                        },
+                        ["columnOffset"] = new JsonObject
+                        {
+                            ["type"] = "integer", ["minimum"] = 0,
+                            ["description"] = "요청 range 내부의 0-based 시작 열. continuation 값을 그대로 사용합니다.",
+                        },
+                        ["maxRows"] = new JsonObject
+                        {
+                            ["type"] = "integer", ["minimum"] = 1,
+                            ["description"] = "한 페이지의 최대 행 수. maxCells와 함께 항상 적용됩니다.",
+                        },
+                        ["maxColumns"] = new JsonObject
+                        {
+                            ["type"] = "integer", ["minimum"] = 1,
+                            ["description"] = "한 페이지의 최대 열 수. maxCells와 함께 항상 적용됩니다.",
+                        },
+                        ["maxCells"] = new JsonObject
+                        {
+                            ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 10000,
+                            ["description"] = "한 페이지의 최대 셀 수. 기본 및 절대 상한은 10000이며 초과 요청은 거절됩니다.",
+                        },
                         ["includeStyles"] = new JsonObject
                         {
                             ["type"] = "boolean",
@@ -583,20 +647,27 @@ public sealed class ToolRegistry
                         ["includeLayout"] = new JsonObject
                         {
                             ["type"] = "boolean",
-                            ["description"] = "true면 mergedAreas, 행/열 hidden 상태, 시트 visibility를 제한 범위 안에서 함께 반환합니다.",
+                            ["description"] = "true면 mergedAreas, 행/열 hidden·height/width, freezePanes, pageSetup, 시트 visibility를 제한 범위 안에서 함께 반환합니다.",
                         },
                     },
                     ["required"] = new JsonArray("range"),
                 },
                 a => host.Read("excel", a)),
 
-            new("excel_inspect", "Excel workbook 구조·표/차트/도형/피벗·수식 오류 또는 제한된 보기/모달 상태를 비파괴 진단",
+            new("excel_inspect", "Excel workbook 구조·표/차트/도형/피벗·수식 오류·수식 의존 경로 또는 제한된 보기/모달 상태를 비파괴 진단",
                 new JsonObject
                 {
                     ["type"] = "object",
                     ["properties"] = new JsonObject
                     {
-                        ["scope"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("scan", "objects", "errors", "diagnostics") },
+                        ["scope"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = ExcelAuthoringSchema.InspectScopeEnum(),
+                            ["description"] = "scan|objects|errors|formula_trace|diagnostics or a data read scope such as tables/names/validations",
+                        },
+                        ["objectKind"] = ExcelAuthoringSchema.DescribeInspectObjectKind(),
+                        ["objectScope"] = new JsonObject { ["type"] = "string", ["description"] = "legacy alias for objectKind" },
                         ["workbook"] = new JsonObject { ["type"] = "string", ["description"] = "diagnostics 외 scope의 선택적 열린 workbook 이름 또는 절대 경로. 경로만으로 닫힌 파일을 자동으로 열지 않습니다." },
                         ["allowOpenFile"] = new JsonObject
                         {
@@ -604,15 +675,99 @@ public sealed class ToolRegistry
                             ["description"] = "기본 false. 사용자가 닫힌 파일을 열어 비파괴 검사하라고 명시한 경우에만 true로 설정합니다. diagnostics에는 적용되지 않습니다.",
                         },
                         ["sheet"] = new JsonObject { ["type"] = "string" },
+                        ["range"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["description"] = "formula_trace required root A1 cell/range. A range qualifier, if present, must match sheet.",
+                        },
+                        ["maxDepth"] = new JsonObject
+                        {
+                            ["type"] = "integer", ["minimum"] = 0, ["maximum"] = 20,
+                            ["description"] = "formula_trace dependency hops. Default 4.",
+                        },
+                        ["maxCells"] = new JsonObject
+                        {
+                            ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 5000,
+                            ["description"] = "formula_trace total verified cell nodes. Default 500.",
+                        },
+                        ["compact"] = new JsonObject
+                        {
+                            ["type"] = "boolean", ["default"] = false,
+                            ["description"] = "formula_trace only: inherit workbook from the result root and encode edge/cycle/unresolved endpoints as quoted sheet!address strings. Keeps values, formulas, errors and coverage.",
+                        },
                         ["limit"] = new JsonObject { ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 2000 },
                     },
                     ["required"] = new JsonArray("scope"),
+                    ["allOf"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["if"] = new JsonObject
+                            {
+                                ["properties"] = new JsonObject
+                                {
+                                    ["scope"] = new JsonObject { ["const"] = "formula_trace" },
+                                },
+                            },
+                            ["then"] = new JsonObject
+                            {
+                                ["required"] = new JsonArray("workbook", "sheet", "range"),
+                            },
+                        },
+                    },
                 },
                 a => host.Read("excel", a)),
 
             new("excel_apply_ops", "Excel 쓰기 ops 적용 (dry-run → confirmToken → apply 안전 흐름)",
                 ExcelApplyOpsSchema(),
                 a => host.ApplyOps("excel", a)),
+
+            new("excel_launch", "Excel 인스턴스에 연결하거나 전용 인스턴스를 만듭니다. ownedInstance는 이 프로세스가 Excel.Application을 생성했을 때만 true입니다. 사용자 창을 닫지 않습니다.",
+                new JsonObject
+                {
+                    ["type"] = "object",
+                    ["description"] =
+                        "dedicatedInstance=false(기본): 실행 중인 Excel이 있으면 붙고, 없으면 생성합니다. " +
+                        "dedicatedInstance=true: 사용자 인스턴스에 붙지 않고 전용 Excel.Application을 만듭니다. " +
+                        "processId/hwnd/activeWindow 중 하나로 특정 창을 지정하면 그 창에만 붙고 핀을 저장합니다. " +
+                        "핀이 있으면 이후 모든 호출이 그 창에만 붙고, 핀 창이 사라지면 명시적 오류로 중단됩니다. " +
+                        "clearPin=true면 핀을 지웁니다. " +
+                        "ownedInstance/createdInstance/attachedExisting/createdWorkbook/pinned을 정직하게 반환합니다.",
+                    ["properties"] = new JsonObject
+                    {
+                        ["dedicatedInstance"] = new JsonObject
+                        {
+                            ["type"] = "boolean",
+                            ["default"] = false,
+                            ["description"] =
+                                "true면 전용 Excel.Application을 생성하거나 이미 소유한 인스턴스를 재사용합니다. " +
+                                "사용자 Excel을 owned로 표시하지 않습니다.",
+                        },
+                        ["processId"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["description"] = "지정할 Excel 프로세스 ID. hwnd와 함께 쓰면 쌍으로 일치해야 합니다.",
+                        },
+                        ["hwnd"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["description"] = "지정할 Excel 창 핸들. excel_get_active_context의 excelHwnd를 사용하세요.",
+                        },
+                        ["activeWindow"] = new JsonObject
+                        {
+                            ["type"] = "boolean",
+                            ["description"] = "true면 현재 포그라운드 Excel 창을 지정합니다. Excel이 포그라운드가 아니면 거절됩니다.",
+                        },
+                        ["clearPin"] = new JsonObject
+                        {
+                            ["type"] = "boolean",
+                            ["description"] = "true면 저장된 핀을 지우고 일반 연결로 돌아갑니다. 지정자와 함께 쓸 수 없습니다.",
+                        },
+                    },
+                },
+                a => host.ExcelLaunch(a)),
 
             new("excel_disconnect", "현재 Excel COM 연결을 즉시 해제합니다. 사용자 Excel에는 Quit을 호출하지 않고, DocBridge 소유 인스턴스만 저장되지 않은 변경이 없을 때 종료합니다.",
                 NoInput("입력 없음"),

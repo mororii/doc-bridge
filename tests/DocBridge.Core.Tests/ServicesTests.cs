@@ -33,7 +33,7 @@ public class PolicyEngineTests : IClassFixture<TestHome>
     [InlineData("excel", "set_rows_hidden", OpClass.Allowed)]
     [InlineData("excel", "set_cols_hidden", OpClass.Allowed)]
     [InlineData("excel", "set_sheet_visibility", OpClass.Allowed)]
-    [InlineData("excel", "delete_sheet", OpClass.Forbidden)]
+    [InlineData("excel", "delete_sheet", OpClass.HighRisk)]
     [InlineData("excel", "run_macro", OpClass.Forbidden)]
     [InlineData("hwp", "insert_text", OpClass.Allowed)]
     [InlineData("hwp", "append_text", OpClass.Allowed)]
@@ -185,7 +185,8 @@ public class OperationValidatorTests
           "ops": [
             { "op": "set_rows_hidden", "target": { "sheet": "내역" }, "row": 2, "count": 3, "hidden": true },
             { "op": "set_cols_hidden", "target": { "sheet": "내역" }, "col": "XFC", "count": 2, "hidden": false },
-            { "op": "set_sheet_visibility", "target": { "sheet": "보조" }, "visibility": "hidden" }
+            { "op": "set_sheet_visibility", "target": { "sheet": "보조" }, "visibility": "hidden" },
+            { "op": "set_sheet_visibility", "target": { "sheet": "원본" }, "visibility": "veryHidden" }
           ],
           "dryRun": true
         }
@@ -199,7 +200,7 @@ public class OperationValidatorTests
           "ops": [
             { "op": "set_rows_hidden", "row": 0, "count": 1, "hidden": true },
             { "op": "set_cols_hidden", "target": { "sheet": "내역" }, "col": "XFD", "count": 2, "hidden": true },
-            { "op": "set_sheet_visibility", "target": { "sheet": "보조" }, "visibility": "veryHidden" }
+            { "op": "set_sheet_visibility", "target": { "sheet": "보조" }, "visibility": "invisible" }
           ],
           "dryRun": true
         }
@@ -209,7 +210,7 @@ public class OperationValidatorTests
         Assert.Contains(invalidErrors, error => error.Contains("target.sheet"));
         Assert.Contains(invalidErrors, error => error.Contains("1..1048576"));
         Assert.Contains(invalidErrors, error => error.Contains("A..XFD"));
-        Assert.Contains(invalidErrors, error => error.Contains("visible' or 'hidden"));
+        Assert.Contains(invalidErrors, error => error.Contains("veryHidden"));
     }
 
     [Fact]
@@ -233,7 +234,7 @@ public class OperationValidatorTests
         """);
         var mixedErrors = new List<string>();
         Assert.Null(_v.Validate(mixed, "excel", mixedErrors));
-        Assert.Contains(mixedErrors, error => error.Contains("only operation", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(mixedErrors, error => error.Contains("cannot be mixed", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

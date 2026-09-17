@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>DocBridge.ExcelProductionWorkflowProbe</AssemblyName>
+    <RootNamespace>DocBridge.Development.ExcelProductionWorkflowProbe</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Description>Production acceptance harness. Public CLI/MCP authoring only. Isolated bin. No product edits.</Description>
+    <OutputPath>$(MSBuildThisFileDirectory)artifacts\bin\$(Configuration)\</OutputPath>
+    <IntermediateOutputPath>$(MSBuildThisFileDirectory)artifacts\obj\$(Configuration)\</IntermediateOutputPath>
+    <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
+    <Deterministic>true</Deterministic>
+    <SkipE1Planner>false</SkipE1Planner>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" Link="Fixtures\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(SkipE1Planner)' == 'true'">
+    <Compile Remove="StyleReconstructor.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(SkipE1Planner)' != 'true'">
+    <Compile Remove="StyleReconstructor.Compat.cs" />
+  </ItemGroup>
+</Project>

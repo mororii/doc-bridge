@@ -18,6 +18,33 @@ public sealed partial class ExcelAdapter
         ExcelStyleContract.Italic,
         ExcelStyleContract.FontSize,
         ExcelStyleContract.NumberFormat,
+        ExcelStyleContract.FontName,
+        ExcelStyleContract.HorizontalAlign,
+        ExcelStyleContract.VerticalAlign,
+        ExcelStyleContract.WrapText,
+        ExcelStyleContract.ShrinkToFit,
+        ExcelStyleContract.Underline,
+        ExcelStyleContract.Strikethrough,
+        ExcelStyleContract.Indent,
+        ExcelStyleContract.Orientation,
+        ExcelStyleContract.Locked,
+    };
+
+    private static readonly string[] AdditionalWritableFormatKeys =
+    {
+        ExcelStyleContract.FontName,
+        ExcelStyleContract.HorizontalAlign,
+        ExcelStyleContract.VerticalAlign,
+        ExcelStyleContract.WrapText,
+        ExcelStyleContract.Borders,
+        ExcelStyleContract.ShrinkToFit,
+        ExcelStyleContract.Underline,
+        ExcelStyleContract.Strikethrough,
+        ExcelStyleContract.Indent,
+        ExcelStyleContract.Orientation,
+        ExcelStyleContract.Locked,
+        ExcelStyleContract.FillPattern,
+        ExcelStyleContract.NoFill,
     };
 
     private static readonly string[] FontColorCoupledKeys =
@@ -46,6 +73,19 @@ public sealed partial class ExcelAdapter
         ExcelStyleContract.NumberFormat,
         ExcelStyleContract.FontColor,
         ExcelStyleContract.FillColor,
+        ExcelStyleContract.FontName,
+        ExcelStyleContract.HorizontalAlign,
+        ExcelStyleContract.VerticalAlign,
+        ExcelStyleContract.WrapText,
+        ExcelStyleContract.Borders,
+        ExcelStyleContract.ShrinkToFit,
+        ExcelStyleContract.Underline,
+        ExcelStyleContract.Strikethrough,
+        ExcelStyleContract.Indent,
+        ExcelStyleContract.Orientation,
+        ExcelStyleContract.Locked,
+        ExcelStyleContract.FillPattern,
+        ExcelStyleContract.NoFill,
     };
 
     private const int ExcelMaxRow = 1_048_576;
@@ -88,9 +128,10 @@ public sealed partial class ExcelAdapter
     private static JsonArray ToScopedPropertyArray(IReadOnlyCollection<string> scoped)
     {
         var properties = new JsonArray();
-        foreach (var key in RequiredFormatOnlyStyleKeys)
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var key in RequiredFormatOnlyStyleKeys.Concat(AdditionalWritableFormatKeys))
         {
-            if (scoped.Contains(key))
+            if (scoped.Contains(key) && seen.Add(key))
                 properties.Add(key);
         }
 
@@ -197,17 +238,35 @@ public sealed partial class ExcelAdapter
 
     private static bool ScopedStyleValueHasExpectedType(string key, JsonNode node)
     {
+        if (string.Equals(key, ExcelStyleContract.Borders, StringComparison.Ordinal))
+            return node is JsonArray;
         if (node is not JsonValue value) return false;
         switch (key)
         {
             case ExcelStyleContract.Bold:
             case ExcelStyleContract.Italic:
+            case ExcelStyleContract.WrapText:
+            case ExcelStyleContract.ShrinkToFit:
+            case ExcelStyleContract.Strikethrough:
+            case ExcelStyleContract.Locked:
+            case ExcelStyleContract.NoFill:
                 return value.TryGetValue<bool>(out _);
             case ExcelStyleContract.NumberFormat:
+            case ExcelStyleContract.FontName:
+            case ExcelStyleContract.HorizontalAlign:
+            case ExcelStyleContract.VerticalAlign:
+            case ExcelStyleContract.Underline:
                 return value.TryGetValue<string>(out var text) && text is not null;
+            case ExcelStyleContract.Orientation:
+                return (value.TryGetValue<string>(out var orientation) &&
+                        orientation.Equals("stacked", StringComparison.OrdinalIgnoreCase))
+                       || TryReadIntegerValue(value);
+            case ExcelStyleContract.Indent:
+                return TryReadIntegerValue(value);
+            case ExcelStyleContract.FillPattern:
+                return value.TryGetValue<string>(out _) || TryReadIntegerValue(value);
             case "fontColorIndex":
             case "fillColorIndex":
-            case "fillPattern":
             case "fillPatternColorIndex":
             case "fontThemeColor":
             case "fillThemeColor":
@@ -216,6 +275,23 @@ public sealed partial class ExcelAdapter
             default:
                 return TryReadFiniteNumberValue(value);
         }
+    }
+
+    private static int ReadCapturedFillPattern(JsonNode? node)
+    {
+        if (node is JsonValue value)
+        {
+            if (value.TryGetValue<string>(out var name) && ExcelStyleContract.FillPatternValues.ContainsKey(name))
+                return ExcelStyleContract.FillPatternValue(name);
+            if (TryReadIntegerValue(value) && value.TryGetValue<int>(out var pattern))
+                return pattern;
+            if (value.TryGetValue<long>(out var longPattern))
+                return (int)longPattern;
+            if (value.TryGetValue<double>(out var number) && double.IsFinite(number))
+                return (int)Math.Round(number);
+        }
+
+        throw new InvalidOperationException("captured fillPattern must be a pattern name or Excel Pattern integer");
     }
 
     private static bool TryReadIntegerValue(JsonValue value)
@@ -307,6 +383,85 @@ public sealed partial class ExcelAdapter
                 style[ExcelStyleContract.NumberFormat] = RequireString(raw, "NumberFormat", areaRef);
             }
 
+            if (scoped.Contains(ExcelStyleContract.FontName))
+            {
+                if (font is null) font = (object)dynamicArea.Font;
+                var raw = (object?)((dynamic)font).Name;
+                if (IsMixed(raw)) return false;
+                style[ExcelStyleContract.FontName] = RequireString(raw, "Font.Name", areaRef);
+            }
+
+            if (scoped.Contains(ExcelStyleContract.HorizontalAlign))
+            {
+                var raw = (object?)dynamicArea.HorizontalAlignment;
+                if (IsMixed(raw)) return false;
+                style[ExcelStyleContract.HorizontalAlign] = ExcelStyleContract.HorizontalAlignName(
+                    RequireInt(raw, "HorizontalAlignment", areaRef));
+            }
+
+            if (scoped.Contains(ExcelStyleContract.VerticalAlign))
+            {
+                var raw = (object?)dynamicArea.VerticalAlignment;
+                if (IsMixed(raw)) return false;
+                style[ExcelStyleContract.VerticalAlign] = ExcelStyleContract.VerticalAlignName(
+                    RequireInt(raw, "VerticalAlignment", areaRef));
+            }
+
+            if (scoped.Contains(ExcelStyleContract.WrapText))
+            {
+                var raw = (object?)dynamicArea.WrapText;
+                if (IsMixed(raw)) return false;
+                style[ExcelStyleContract.WrapText] = RequireBoolean(raw, "WrapText", areaRef);
+            }
+
+            if (scoped.Contains(ExcelStyleContract.ShrinkToFit))
+            {
+                var raw = (object?)dynamicArea.ShrinkToFit;
+                if (IsMixed(raw)) return false;
+                style[ExcelStyleContract.ShrinkToFit] = RequireBoolean(raw, "ShrinkToFit", areaRef);
+            }
+
+            if (scoped.Contains(ExcelStyleContract.Underline))
+            {
+                if (font is null) font = (object)dynamicArea.Font;
+                var raw = (object?)((dynamic)font).Underline;
+                if (IsMixed(raw)) return false;
+                style[ExcelStyleContract.Underline] = ExcelStyleContract.UnderlineName(
+                    RequireInt(raw, "Font.Underline", areaRef));
+            }
+
+            if (scoped.Contains(ExcelStyleContract.Strikethrough))
+            {
+                if (font is null) font = (object)dynamicArea.Font;
+                var raw = (object?)((dynamic)font).Strikethrough;
+                if (IsMixed(raw)) return false;
+                style[ExcelStyleContract.Strikethrough] = RequireBoolean(raw, "Font.Strikethrough", areaRef);
+            }
+
+            if (scoped.Contains(ExcelStyleContract.Indent))
+            {
+                var raw = (object?)dynamicArea.IndentLevel;
+                if (IsMixed(raw)) return false;
+                style[ExcelStyleContract.Indent] = RequireInt(raw, "IndentLevel", areaRef);
+            }
+
+            if (scoped.Contains(ExcelStyleContract.Orientation))
+            {
+                var raw = (object?)dynamicArea.Orientation;
+                if (IsMixed(raw)) return false;
+                var degrees = RequireInt(raw, "Orientation", areaRef);
+                style[ExcelStyleContract.Orientation] = degrees == ExcelStyleContract.XlOrientationStacked
+                    ? JsonValue.Create("stacked")
+                    : JsonValue.Create(degrees);
+            }
+
+            if (scoped.Contains(ExcelStyleContract.Locked))
+            {
+                var raw = (object?)dynamicArea.Locked;
+                if (IsMixed(raw)) return false;
+                style[ExcelStyleContract.Locked] = RequireBoolean(raw, "Locked", areaRef);
+            }
+
             return true;
         }
         finally
@@ -325,8 +480,13 @@ public sealed partial class ExcelAdapter
             var needsFont = scoped.Contains(ExcelStyleContract.Bold)
                 || scoped.Contains(ExcelStyleContract.Italic)
                 || scoped.Contains(ExcelStyleContract.FontSize)
-                || scoped.Contains(ExcelStyleContract.FontColor);
-            var needsInterior = scoped.Contains(ExcelStyleContract.FillColor);
+                || scoped.Contains(ExcelStyleContract.FontColor)
+                || scoped.Contains(ExcelStyleContract.FontName)
+                || scoped.Contains(ExcelStyleContract.Underline)
+                || scoped.Contains(ExcelStyleContract.Strikethrough);
+            var needsInterior = scoped.Contains(ExcelStyleContract.FillColor)
+                || scoped.Contains(ExcelStyleContract.FillPattern)
+                || scoped.Contains(ExcelStyleContract.NoFill);
             if (needsFont) font = (object)dynamicCell.Font;
             if (needsInterior) interior = (object)dynamicCell.Interior;
             dynamic dynamicFont = font!;
@@ -352,6 +512,37 @@ public sealed partial class ExcelAdapter
                 RejectUnsupportedRgbTint(cellRef, "Font.TintAndShade", style, "fontTintAndShade", "fontThemeColor");
             }
 
+            if (scoped.Contains(ExcelStyleContract.FontName))
+                style[ExcelStyleContract.FontName] = RequireString(dynamicFont.Name, "Font.Name", cellRef);
+            if (scoped.Contains(ExcelStyleContract.HorizontalAlign))
+                style[ExcelStyleContract.HorizontalAlign] = ExcelStyleContract.HorizontalAlignName(
+                    RequireInt(dynamicCell.HorizontalAlignment, "HorizontalAlignment", cellRef));
+            if (scoped.Contains(ExcelStyleContract.VerticalAlign))
+                style[ExcelStyleContract.VerticalAlign] = ExcelStyleContract.VerticalAlignName(
+                    RequireInt(dynamicCell.VerticalAlignment, "VerticalAlignment", cellRef));
+            if (scoped.Contains(ExcelStyleContract.WrapText))
+                style[ExcelStyleContract.WrapText] = RequireBoolean(dynamicCell.WrapText, "WrapText", cellRef);
+            if (scoped.Contains(ExcelStyleContract.ShrinkToFit))
+                style[ExcelStyleContract.ShrinkToFit] = RequireBoolean(dynamicCell.ShrinkToFit, "ShrinkToFit", cellRef);
+            if (scoped.Contains(ExcelStyleContract.Underline))
+                style[ExcelStyleContract.Underline] = ExcelStyleContract.UnderlineName(
+                    RequireInt(dynamicFont.Underline, "Font.Underline", cellRef));
+            if (scoped.Contains(ExcelStyleContract.Strikethrough))
+                style[ExcelStyleContract.Strikethrough] = RequireBoolean(dynamicFont.Strikethrough, "Font.Strikethrough", cellRef);
+            if (scoped.Contains(ExcelStyleContract.Indent))
+                style[ExcelStyleContract.Indent] = RequireInt(dynamicCell.IndentLevel, "IndentLevel", cellRef);
+            if (scoped.Contains(ExcelStyleContract.Orientation))
+            {
+                var degrees = RequireInt(dynamicCell.Orientation, "Orientation", cellRef);
+                style[ExcelStyleContract.Orientation] = degrees == ExcelStyleContract.XlOrientationStacked
+                    ? JsonValue.Create("stacked")
+                    : JsonValue.Create(degrees);
+            }
+            if (scoped.Contains(ExcelStyleContract.Locked))
+                style[ExcelStyleContract.Locked] = RequireBoolean(dynamicCell.Locked, "Locked", cellRef);
+            if (scoped.Contains(ExcelStyleContract.Borders))
+                style[ExcelStyleContract.Borders] = CaptureCellBorders(cell);
+
             if (scoped.Contains(ExcelStyleContract.FillColor))
             {
                 style[ExcelStyleContract.FillColor] = RequireDouble(dynamicInterior.Color, "Interior.Color", cellRef);
@@ -367,6 +558,15 @@ public sealed partial class ExcelAdapter
                     style["fillPatternThemeColor"] = patternTheme;
                 RejectUnsupportedRgbTint(cellRef, "Interior.TintAndShade", style, "fillTintAndShade", "fillThemeColor");
                 RejectUnsupportedRgbTint(cellRef, "Interior.PatternTintAndShade", style, "fillPatternTintAndShade", "fillPatternThemeColor");
+            }
+            else
+            {
+                if (scoped.Contains(ExcelStyleContract.FillPattern))
+                    style[ExcelStyleContract.FillPattern] = ExcelStyleContract.FillPatternName(
+                        RequireInt(dynamicInterior.Pattern, "Interior.Pattern", cellRef));
+                if (scoped.Contains(ExcelStyleContract.NoFill))
+                    style[ExcelStyleContract.NoFill] =
+                        RequireInt(dynamicInterior.Pattern, "Interior.Pattern", cellRef) == ExcelStyleContract.XlPatternNone;
             }
 
             return style;
@@ -388,8 +588,13 @@ public sealed partial class ExcelAdapter
             var needsFont = scoped.Contains(ExcelStyleContract.Bold)
                 || scoped.Contains(ExcelStyleContract.Italic)
                 || scoped.Contains(ExcelStyleContract.FontSize)
-                || scoped.Contains(ExcelStyleContract.FontColor);
-            var needsInterior = scoped.Contains(ExcelStyleContract.FillColor);
+                || scoped.Contains(ExcelStyleContract.FontColor)
+                || scoped.Contains(ExcelStyleContract.FontName)
+                || scoped.Contains(ExcelStyleContract.Underline)
+                || scoped.Contains(ExcelStyleContract.Strikethrough);
+            var needsInterior = scoped.Contains(ExcelStyleContract.FillColor)
+                || scoped.Contains(ExcelStyleContract.FillPattern)
+                || scoped.Contains(ExcelStyleContract.NoFill);
             if (needsFont) font = (object)dynamicTarget.Font;
             if (needsInterior) interior = (object)dynamicTarget.Interior;
             dynamic dynamicFont = font!;
@@ -402,7 +607,31 @@ public sealed partial class ExcelAdapter
             if (scoped.Contains(ExcelStyleContract.FontSize) && style.ContainsKey(ExcelStyleContract.FontSize))
                 dynamicFont.Size = RequiredNumber(style, ExcelStyleContract.FontSize);
             if (scoped.Contains(ExcelStyleContract.NumberFormat) && style.ContainsKey(ExcelStyleContract.NumberFormat))
-                dynamicTarget.NumberFormat = RequiredText(style, ExcelStyleContract.NumberFormat);
+                AssignRangeNumberFormat(dynamicTarget, RequiredText(style, ExcelStyleContract.NumberFormat));
+            if (scoped.Contains(ExcelStyleContract.FontName) && style.ContainsKey(ExcelStyleContract.FontName))
+                dynamicFont.Name = RequiredText(style, ExcelStyleContract.FontName);
+            if (scoped.Contains(ExcelStyleContract.HorizontalAlign) && style.ContainsKey(ExcelStyleContract.HorizontalAlign))
+                dynamicTarget.HorizontalAlignment = ExcelStyleContract.HorizontalAlignValue(
+                    RequiredText(style, ExcelStyleContract.HorizontalAlign));
+            if (scoped.Contains(ExcelStyleContract.VerticalAlign) && style.ContainsKey(ExcelStyleContract.VerticalAlign))
+                dynamicTarget.VerticalAlignment = ExcelStyleContract.VerticalAlignValue(
+                    RequiredText(style, ExcelStyleContract.VerticalAlign));
+            if (scoped.Contains(ExcelStyleContract.WrapText) && style.ContainsKey(ExcelStyleContract.WrapText))
+                dynamicTarget.WrapText = RequiredBool(style, ExcelStyleContract.WrapText);
+            if (scoped.Contains(ExcelStyleContract.ShrinkToFit) && style.ContainsKey(ExcelStyleContract.ShrinkToFit))
+                dynamicTarget.ShrinkToFit = RequiredBool(style, ExcelStyleContract.ShrinkToFit);
+            if (scoped.Contains(ExcelStyleContract.Underline) && style.ContainsKey(ExcelStyleContract.Underline))
+                dynamicFont.Underline = ExcelStyleContract.UnderlineValue(RequiredText(style, ExcelStyleContract.Underline));
+            if (scoped.Contains(ExcelStyleContract.Strikethrough) && style.ContainsKey(ExcelStyleContract.Strikethrough))
+                dynamicFont.Strikethrough = RequiredBool(style, ExcelStyleContract.Strikethrough);
+            if (scoped.Contains(ExcelStyleContract.Indent) && style.ContainsKey(ExcelStyleContract.Indent))
+                dynamicTarget.IndentLevel = RequiredInt(style, ExcelStyleContract.Indent);
+            if (scoped.Contains(ExcelStyleContract.Orientation) && style.ContainsKey(ExcelStyleContract.Orientation))
+                dynamicTarget.Orientation = ExcelStyleContract.OrientationValue(style[ExcelStyleContract.Orientation]!);
+            if (scoped.Contains(ExcelStyleContract.Locked) && style.ContainsKey(ExcelStyleContract.Locked))
+                dynamicTarget.Locked = RequiredBool(style, ExcelStyleContract.Locked);
+            if (scoped.Contains(ExcelStyleContract.Borders) && style[ExcelStyleContract.Borders] is JsonArray borderStates)
+                RestoreCellBorders(target, borderStates);
 
             if (scoped.Contains(ExcelStyleContract.FontColor) && style.ContainsKey(ExcelStyleContract.FontColor))
             {
@@ -430,6 +659,16 @@ public sealed partial class ExcelAdapter
                     OptionalInt(style, "fillPatternThemeColor"),
                     pattern: true);
                 dynamicInterior.Pattern = RequiredInt(style, "fillPattern");
+            }
+            else if (scoped.Contains(ExcelStyleContract.NoFill) &&
+                     style.ContainsKey(ExcelStyleContract.NoFill) &&
+                     RequiredBool(style, ExcelStyleContract.NoFill))
+            {
+                dynamicInterior.Pattern = ExcelStyleContract.XlPatternNone;
+            }
+            else if (scoped.Contains(ExcelStyleContract.FillPattern) && style.ContainsKey(ExcelStyleContract.FillPattern))
+            {
+                dynamicInterior.Pattern = ReadCapturedFillPattern(style[ExcelStyleContract.FillPattern]);
             }
         }
         finally
@@ -537,9 +776,13 @@ public sealed partial class ExcelAdapter
             var needsFont = style.ContainsKey(ExcelStyleContract.Bold)
                 || style.ContainsKey(ExcelStyleContract.Italic)
                 || style.ContainsKey(ExcelStyleContract.FontSize)
-                || style.ContainsKey(ExcelStyleContract.FontColor);
+                || style.ContainsKey(ExcelStyleContract.FontColor)
+                || style.ContainsKey(ExcelStyleContract.FontName)
+                || style.ContainsKey(ExcelStyleContract.Underline)
+                || style.ContainsKey(ExcelStyleContract.Strikethrough);
             var needsInterior = style.ContainsKey(ExcelStyleContract.FillColor)
-                || style.ContainsKey("fillPattern");
+                || style.ContainsKey(ExcelStyleContract.FillPattern)
+                || style.ContainsKey(ExcelStyleContract.NoFill);
             if (needsFont) font = (object)dynamicTarget.Font;
             if (needsInterior) interior = (object)dynamicTarget.Interior;
             dynamic dynamicFont = font!;
@@ -555,10 +798,57 @@ public sealed partial class ExcelAdapter
                 && !NumbersEqual(RequireDouble(dynamicFont.Size, "Font.Size", "verify"), RequiredNumber(style, ExcelStyleContract.FontSize)))
                 return false;
             if (style.ContainsKey(ExcelStyleContract.NumberFormat)
-                && !string.Equals(
-                    RequireString(dynamicTarget.NumberFormat, "NumberFormat", "verify"),
+                && !ExcelNumberFormatContract.ReadbackMatches(
                     RequiredText(style, ExcelStyleContract.NumberFormat),
-                    StringComparison.Ordinal))
+                    RequireString(dynamicTarget.NumberFormat, "NumberFormat", "verify")))
+                return false;
+            if (style.ContainsKey(ExcelStyleContract.FontName)
+                && !string.Equals(
+                    RequireString(dynamicFont.Name, "Font.Name", "verify"),
+                    RequiredText(style, ExcelStyleContract.FontName),
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (style.ContainsKey(ExcelStyleContract.HorizontalAlign)
+                && ExcelStyleContract.HorizontalAlignName(
+                    RequireInt(dynamicTarget.HorizontalAlignment, "HorizontalAlignment", "verify")) !=
+                RequiredText(style, ExcelStyleContract.HorizontalAlign))
+                return false;
+            if (style.ContainsKey(ExcelStyleContract.VerticalAlign)
+                && ExcelStyleContract.VerticalAlignName(
+                    RequireInt(dynamicTarget.VerticalAlignment, "VerticalAlignment", "verify")) !=
+                RequiredText(style, ExcelStyleContract.VerticalAlign))
+                return false;
+            if (style.ContainsKey(ExcelStyleContract.WrapText)
+                && RequireBoolean(dynamicTarget.WrapText, "WrapText", "verify") !=
+                RequiredBool(style, ExcelStyleContract.WrapText))
+                return false;
+            if (style.ContainsKey(ExcelStyleContract.ShrinkToFit)
+                && RequireBoolean(dynamicTarget.ShrinkToFit, "ShrinkToFit", "verify") !=
+                RequiredBool(style, ExcelStyleContract.ShrinkToFit))
+                return false;
+            if (style.ContainsKey(ExcelStyleContract.Underline)
+                && ExcelStyleContract.UnderlineName(
+                    RequireInt(dynamicFont.Underline, "Font.Underline", "verify")) !=
+                RequiredText(style, ExcelStyleContract.Underline))
+                return false;
+            if (style.ContainsKey(ExcelStyleContract.Strikethrough)
+                && RequireBoolean(dynamicFont.Strikethrough, "Font.Strikethrough", "verify") !=
+                RequiredBool(style, ExcelStyleContract.Strikethrough))
+                return false;
+            if (style.ContainsKey(ExcelStyleContract.Indent)
+                && !ScalarIntEquals((object?)dynamicTarget.IndentLevel, RequiredInt(style, ExcelStyleContract.Indent)))
+                return false;
+            if (style.ContainsKey(ExcelStyleContract.Orientation)
+                && !ScalarIntEquals(
+                    (object?)dynamicTarget.Orientation,
+                    ExcelStyleContract.OrientationValue(style[ExcelStyleContract.Orientation]!)))
+                return false;
+            if (style.ContainsKey(ExcelStyleContract.Locked)
+                && RequireBoolean(dynamicTarget.Locked, "Locked", "verify") !=
+                RequiredBool(style, ExcelStyleContract.Locked))
+                return false;
+            if (style[ExcelStyleContract.Borders] is JsonArray expectedBorders
+                && !CellBordersMatch(target, expectedBorders))
                 return false;
             if (style.ContainsKey(ExcelStyleContract.FontColor)
                 && !LinkedColorMatches(
@@ -588,6 +878,14 @@ public sealed partial class ExcelAdapter
                         pattern: true))
                     return false;
             }
+            else if (style.ContainsKey(ExcelStyleContract.NoFill) && RequiredBool(style, ExcelStyleContract.NoFill))
+            {
+                if (!ScalarIntEquals((object?)dynamicInterior.Pattern, ExcelStyleContract.XlPatternNone))
+                    return false;
+            }
+            else if (style.ContainsKey(ExcelStyleContract.FillPattern)
+                     && !ScalarIntEquals((object?)dynamicInterior.Pattern, ReadCapturedFillPattern(style[ExcelStyleContract.FillPattern])))
+                return false;
 
             return true;
         }

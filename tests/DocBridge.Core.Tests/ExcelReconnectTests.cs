@@ -82,7 +82,7 @@ public class ExcelReconnectTests
     }
 
     [Fact]
-    public void Owned_instance_is_visible_and_quit_when_all_workbooks_are_saved()
+    public void Owned_instance_with_saved_workbook_is_detached_without_quit()
     {
         var application = new LifecycleExcelApplication(saved: true);
         using var adapter = new ExcelAdapter(() => application, appFactoryOwnsInstance: true);
@@ -90,6 +90,37 @@ public class ExcelReconnectTests
         var status = adapter.GetStatus();
         Assert.True(application.Visible);
         Assert.Equal("DocBridge가 생성한 인스턴스", status.Detail);
+
+        var disconnected = adapter.Disconnect();
+        Assert.False(disconnected["quitCalled"]!.GetValue<bool>());
+        Assert.Equal(0, application.QuitCalls);
+        Assert.Contains(
+            disconnected["warnings"]!.AsArray().Select(node => node!.GetValue<string>()),
+            warning => warning.Contains("Saved does not authorize Quit", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Owned_instance_with_saved_preexisting_and_saved_output_is_detached_without_quit()
+    {
+        var application = new MultiSavedWorkbookExcelApplication();
+        using var adapter = new ExcelAdapter(() => application, appFactoryOwnsInstance: true);
+        Assert.True(adapter.GetStatus().Connected);
+        Assert.Equal(2, application.Workbooks.Count);
+
+        var disconnected = adapter.Disconnect();
+        Assert.False(disconnected["quitCalled"]!.GetValue<bool>());
+        Assert.Equal(0, application.QuitCalls);
+        Assert.Contains(
+            disconnected["warnings"]!.AsArray().Select(node => node!.GetValue<string>()),
+            warning => warning.Contains("Saved does not authorize Quit", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Empty_owned_instance_is_quit_on_disconnect()
+    {
+        var application = new EmptyOwnedExcelApplication(openThrows: false);
+        using var adapter = new ExcelAdapter(() => application, appFactoryOwnsInstance: true);
+        Assert.True(adapter.GetStatus().Connected);
 
         var disconnected = adapter.Disconnect();
         Assert.True(disconnected["quitCalled"]!.GetValue<bool>());
@@ -353,6 +384,34 @@ public class ExcelReconnectTests
         public LifecycleWorkbook ActiveWorkbook { get; }
         public LifecycleWorkbooks Workbooks { get; }
         public void Quit() => QuitCalls++;
+    }
+
+    public sealed class MultiSavedWorkbookExcelApplication
+    {
+        public MultiSavedWorkbookExcelApplication()
+        {
+            var preexisting = new LifecycleWorkbook(@"C:\work\e2-cost-estimate.xlsx", saved: true);
+            var delivered = new LifecycleWorkbook(@"C:\out\e6-weekly.xlsx", saved: true);
+            ActiveWorkbook = delivered;
+            Workbooks = new MultiSavedWorkbooks(preexisting, delivered);
+        }
+
+        public bool Visible { get; set; }
+        public int QuitCalls { get; private set; }
+        public long Hwnd => 505;
+        public string Version => "16.0";
+        public LifecycleWorkbook ActiveWorkbook { get; }
+        public MultiSavedWorkbooks Workbooks { get; }
+        public void Quit() => QuitCalls++;
+    }
+
+    public sealed class MultiSavedWorkbooks
+    {
+        private readonly LifecycleWorkbook[] _books;
+        public MultiSavedWorkbooks(params LifecycleWorkbook[] books) => _books = books;
+        public int Count => _books.Length;
+        public LifecycleWorkbook Item(int index) =>
+            index >= 1 && index <= _books.Length ? _books[index - 1] : throw new ArgumentOutOfRangeException(nameof(index));
     }
 
     public sealed class LifecycleWorkbooks

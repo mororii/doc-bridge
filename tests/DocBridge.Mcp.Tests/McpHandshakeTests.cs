@@ -55,13 +55,13 @@ public class McpHandshakeTests : IDisposable
     {
         var res = _dispatcher.Dispatch(Req("tools/list", 2));
         var tools = Json.GetArr(ResultOf(res), "tools")!;
-        Assert.Equal(29, tools.Count);
+        Assert.Equal(30, tools.Count);
 
         var names = tools.Select(t => Json.GetString(t as JsonObject, "name")!).ToHashSet();
         foreach (var want in new[]
         {
             "core_ping", "core_get_status", "core_get_capabilities", "core_disconnect", "core_create_snapshot", "core_list_snapshots", "core_restore_snapshot",
-            "excel_get_active_context", "excel_read_range", "excel_inspect", "excel_apply_ops", "excel_disconnect",
+            "excel_get_active_context", "excel_read_range", "excel_inspect", "excel_apply_ops", "excel_launch", "excel_disconnect",
             "hwp_plan_creation", "hwp_launch", "hwp_get_active_context", "hwp_doctor", "hwp_repair_typelib", "hwp_read_text", "hwp_apply_ops", "hwp_submit_ops", "hwp_get_job",
             "cad_launch", "cad_get_active_context", "cad_query_entities", "cad_apply_ops",
             "gstarcad_launch", "gstarcad_get_active_context", "gstarcad_query_entities", "gstarcad_apply_ops",
@@ -104,20 +104,50 @@ public class McpHandshakeTests : IDisposable
         var statusTool = tools.Select(t => t as JsonObject).First(t => Json.GetString(t, "name") == "core_get_status")!;
         Assert.NotNull(Json.GetObj(Json.GetObj(Json.GetObj(statusTool, "inputSchema"), "properties"), "app"));
         var excelWriteItems = Json.GetObj(Json.GetObj(Json.GetObj(excelWriteSchema, "properties"), "ops"), "items")!;
-        var excelWriteProperties = Json.GetObj(excelWriteItems, "properties")!;
-        Assert.NotNull(Json.GetObj(excelWriteProperties, "target"));
-        Assert.NotNull(Json.GetObj(excelWriteProperties, "range"));
-        Assert.NotNull(Json.GetObj(excelWriteProperties, "values"));
-        var excelOpEnum = Json.GetArr(Json.GetObj(excelWriteProperties, "op"), "enum")!;
-        var excelOps = excelOpEnum.Select(item => item!.GetValue<string>()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.Null(Json.GetObj(excelWriteItems, "properties"));
+        var excelAnyOf = Json.GetArr(excelWriteItems, "anyOf")!;
+        Assert.True(excelAnyOf.Count >= 40);
+        var leftover = excelAnyOf.OfType<JsonObject>().First(branch =>
+            Json.GetArr(Json.GetObj(Json.GetObj(branch, "properties"), "op"), "enum") is not null);
+        var leftoverProperties = Json.GetObj(leftover, "properties")!;
+        Assert.NotNull(Json.GetObj(leftoverProperties, "target"));
+        Assert.NotNull(Json.GetObj(leftoverProperties, "range"));
+        Assert.NotNull(Json.GetObj(leftoverProperties, "values"));
+        Assert.Equal("string", Json.GetString(Json.GetObj(leftoverProperties, "position"), "type"));
+        var leftoverOps = Json.GetArr(Json.GetObj(leftoverProperties, "op"), "enum")!
+            .Select(item => item!.GetValue<string>()).ToHashSet(StringComparer.OrdinalIgnoreCase);
         Assert.True(new[]
         {
             "set_values", "merge_cells", "unmerge_cells", "set_rows_hidden", "set_cols_hidden",
-            "set_sheet_visibility",
-        }.All(excelOps.Contains));
-        Assert.NotNull(Json.GetObj(excelWriteProperties, "hidden"));
-        Assert.NotNull(Json.GetObj(excelWriteProperties, "visibility"));
-        var excelStyle = Json.GetObj(excelWriteProperties, "style")!;
+            "set_sheet_visibility", "set_row_heights", "freeze_panes", "set_page_setup",
+            "rename_sheet", "clear_range", "create_workbook", "export_pdf",
+        }.All(leftoverOps.Contains));
+        Assert.DoesNotContain("create_table", leftoverOps);
+        Assert.DoesNotContain("create_chart", leftoverOps);
+        Assert.DoesNotContain("create_pivot", leftoverOps);
+        Assert.DoesNotContain("define_name", leftoverOps);
+        foreach (var want in new[] { "create_table", "create_chart", "create_pivot", "define_name" })
+        {
+            Assert.Contains(excelAnyOf, node =>
+                node is JsonObject branch &&
+                string.Equals(Json.GetString(Json.GetObj(Json.GetObj(branch, "properties"), "op"), "const"),
+                    want, StringComparison.OrdinalIgnoreCase));
+        }
+        var chartBranch = excelAnyOf.OfType<JsonObject>().First(branch =>
+            string.Equals(Json.GetString(Json.GetObj(Json.GetObj(branch, "properties"), "op"), "const"),
+                "create_chart", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("object", Json.GetString(Json.GetObj(Json.GetObj(chartBranch, "properties"), "position"), "type"));
+        var defineBranch = excelAnyOf.OfType<JsonObject>().First(branch =>
+            string.Equals(Json.GetString(Json.GetObj(Json.GetObj(branch, "properties"), "op"), "const"),
+                "define_name", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("boolean", Json.GetString(Json.GetObj(Json.GetObj(defineBranch, "properties"), "replace"), "type"));
+        var pivotBranch = excelAnyOf.OfType<JsonObject>().First(branch =>
+            string.Equals(Json.GetString(Json.GetObj(Json.GetObj(branch, "properties"), "op"), "const"),
+                "create_pivot", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("string", Json.GetString(Json.GetObj(Json.GetObj(Json.GetObj(pivotBranch, "properties"), "rows"), "items"), "type"));
+        Assert.NotNull(Json.GetObj(leftoverProperties, "hidden"));
+        Assert.NotNull(Json.GetObj(leftoverProperties, "visibility"));
+        var excelStyle = Json.GetObj(leftoverProperties, "style")!;
         Assert.False(excelStyle["additionalProperties"]!.GetValue<bool>());
         Assert.NotNull(Json.GetObj(Json.GetObj(excelStyle, "properties"), "bold"));
         Assert.Contains("bold", Json.GetString(excelStyle, "description"), StringComparison.OrdinalIgnoreCase);
@@ -128,6 +158,12 @@ public class McpHandshakeTests : IDisposable
         var includeStyles = Json.GetString(Json.GetObj(excelReadProperties, "includeStyles"), "description");
         Assert.Contains("fontBold", includeStyles, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("fillPattern", includeStyles, StringComparison.OrdinalIgnoreCase);
+        foreach (var property in new[] { "rowOffset", "columnOffset", "maxRows", "maxColumns", "maxCells", "formulaMode" })
+            Assert.NotNull(Json.GetObj(excelReadProperties, property));
+        Assert.Equal(0, Json.GetInt(Json.GetObj(excelReadProperties, "rowOffset"), "minimum"));
+        Assert.Equal(10_000, Json.GetInt(Json.GetObj(excelReadProperties, "maxCells"), "maximum"));
+        Assert.Equal(new[] { "formula", "formula2" }, Json.GetArr(Json.GetObj(excelReadProperties, "formulaMode"), "enum")!
+            .Select(node => node!.GetValue<string>()));
 
         var cadQueryTool = tools.Select(t => t as JsonObject).First(t => Json.GetString(t, "name") == "cad_query_entities")!;
         var cadScopeEnum = Json.GetArr(Json.GetObj(Json.GetObj(Json.GetObj(cadQueryTool, "inputSchema"), "properties"), "scope"), "enum")!;
@@ -243,6 +279,7 @@ public class McpHandshakeTests : IDisposable
         var inspectScopes = Json.GetArr(Json.GetObj(inspectProperties, "scope"), "enum")!;
         Assert.Contains(inspectScopes, item => item!.GetValue<string>() == "errors");
         Assert.Contains(inspectScopes, item => item!.GetValue<string>() == "diagnostics");
+        Assert.Contains(inspectScopes, item => item!.GetValue<string>() == "richText");
         Assert.NotNull(Json.GetObj(inspectProperties, "allowOpenFile"));
 
         var hwpRepair = tools.Select(t => t as JsonObject).First(t => Json.GetString(t, "name") == "hwp_repair_typelib")!;

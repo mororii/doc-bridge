@@ -7,10 +7,10 @@
   "highRiskTools": ["core_restore_snapshot", "hwp_repair_typelib"],
   "apps": {
     "excel": {
-      "writeOps": ["set_values", "set_formulas", "insert_rows", "insert_cols", "format_range", "find_replace", "copy_sheet", "merge_cells", "unmerge_cells", "set_rows_hidden", "set_cols_hidden", "set_sheet_visibility"],
+      "writeOps": ["set_values", "set_formulas", "insert_rows", "insert_cols", "format_range", "find_replace", "copy_sheet", "merge_cells", "unmerge_cells", "set_rows_hidden", "set_cols_hidden", "set_sheet_visibility", "set_row_heights", "set_column_widths", "freeze_panes", "set_page_setup", "set_view", "rename_sheet", "clear_range", "copy_range", "add_sheet", "move_sheet", "protect_sheet", "unprotect_sheet", "create_workbook", "open_workbook", "close_workbook", "fill_range", "auto_fill", "calculate", "set_tab_color", "set_outline", "import_csv", "export_csv", "set_page_breaks"],
       "autoExecuteOps": ["set_values", "set_formulas", "format_range"],
-      "highRiskOps": [],
-      "forbiddenOps": ["delete_sheet", "overwrite_workbook_without_backup", "run_macro"]
+      "highRiskOps": ["delete_rows", "delete_cols", "delete_sheet", "save_workbook", "export_pdf"],
+      "forbiddenOps": ["overwrite_workbook_without_backup", "run_macro"]
     },
     "hwp": {
       "writeOps": ["insert_text", "append_text", "insert_before_text", "insert_after_text", "replace_document_text", "replace_selection", "find_replace", "set_paragraph_style_basic", "set_paragraph_format", "format_paragraphs", "set_page_setup", "insert_break", "insert_table", "table_cell_set_text", "table_set_cells", "table_insert_rows", "table_insert_columns", "table_merge_cells", "table_set_row_height", "table_set_row_heights", "insert_picture", "insert_page_number", "set_header_footer_text", "set_field_text"],

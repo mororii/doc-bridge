@@ -31,11 +31,11 @@ public sealed class ExcelLifecycleProbePolicyTests
     }
 
     [Fact]
-    public void TryQuitSafely_quits_when_single_workbook_is_saved()
+    public void TryQuitSafely_refuses_when_single_workbook_is_saved()
     {
         var app = new ExcelReconnectTests.LifecycleExcelApplication(saved: true);
-        Assert.True(InvokeTryQuitSafely(app));
-        Assert.Equal(1, app.QuitCalls);
+        Assert.False(InvokeTryQuitSafely(app));
+        Assert.Equal(0, app.QuitCalls);
     }
 
     [Fact]
